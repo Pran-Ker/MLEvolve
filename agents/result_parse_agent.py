@@ -148,7 +148,8 @@ def get_review_func_spec(use_memory: bool) -> FunctionSpec:
 
 
 def _build_introduction(agent) -> str:
-    return (
+    use_memory = getattr(agent.acfg, "use_global_memory", False)
+    intro = (
         "You are a Kaggle grandmaster attending a competition. "
         "You have written code to solve this task and now need to evaluate the output of the code execution. "
         "You should determine if there were any bugs as well as report the empirical findings.\n\n"
@@ -156,9 +157,15 @@ def _build_introduction(agent) -> str:
         "- \"is_bug\": (boolean) true if execution failed or has bugs, false otherwise.\n"
         "- \"summary\": (string) A concise 2-3 sentence summary of the execution outcome.\n"
         "- \"metric\": (number or null) The validation metric value if the code ran successfully, otherwise null.\n"
-        "- \"lower_is_better\": (boolean) true if the metric should be minimized, false if maximized.\n\n"
-        "Do NOT omit any field."
+        "- \"lower_is_better\": (boolean) true if the metric should be minimized, false if maximized.\n"
     )
+    if use_memory:
+        intro += (
+            "- \"code_summary\": (string) A concise method summary of the code, covering key parts such as "
+            "data preprocessing, feature engineering, model architecture/training, and validation strategy.\n"
+        )
+    intro += "\nDo NOT omit any field."
+    return intro
 
 
 def _check_submission_file(agent, node: SearchNode) -> bool:
