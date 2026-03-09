@@ -146,6 +146,76 @@ def chat(
     return output
 
 
+def agentic_chat(
+    messages: list[dict],
+    system_message: str | None = None,
+    tools: list[dict] | None = None,
+    tool_executor=None,
+    cfg: Config = None,
+    model: str | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    max_tool_rounds: int = 5,
+) -> tuple[str, list[dict]]:
+    """Multi-turn chat with tool-use loop.
+
+    Calls messages.create() with tools. If response has tool_use blocks,
+    executes via tool_executor(name, input) -> str, appends tool_result,
+    re-calls until text-only or max_tool_rounds exhausted.
+
+    Returns (text_response, final_messages).
+    """
+    _setup_claude_client(cfg)
+
+    model = model or "claude-sonnet-4-20250514"
+    max_tokens = max_tokens or 16384
+    temperature = temperature if temperature is not None else 1.0
+
+    working_messages = list(messages)
+    text_parts = []
+
+    for round_idx in range(max_tool_rounds):
+        api_kwargs = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": working_messages,
+        }
+        if system_message:
+            api_kwargs["system"] = system_message
+        if tools:
+            api_kwargs["tools"] = tools
+
+        logger.info(f"[agentic_chat] round {round_idx + 1}/{max_tool_rounds}, model={model}")
+        response = _client.messages.create(**api_kwargs)
+
+        text_parts = []
+        tool_uses = []
+        for block in response.content:
+            if block.type == "text":
+                text_parts.append(block.text)
+            elif block.type == "tool_use":
+                tool_uses.append(block)
+
+        working_messages.append({"role": "assistant", "content": response.content})
+
+        if response.stop_reason != "tool_use" or not tool_uses or not tool_executor:
+            break
+
+        logger.info(f"[agentic_chat] executing {len(tool_uses)} tool call(s)")
+        tool_results = []
+        for tool_use in tool_uses:
+            result = tool_executor(tool_use.name, tool_use.input)
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": tool_use.id,
+                "content": str(result),
+            })
+        working_messages.append({"role": "user", "content": tool_results})
+
+    return "".join(text_parts), working_messages
+
+
 def generate(
     prompt: str | dict | list,
     cfg: Config,

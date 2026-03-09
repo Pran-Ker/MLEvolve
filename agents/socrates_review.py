@@ -1,33 +1,40 @@
-"""Socrates review loop for improvement plans.
+"""Socrates review loop with tool access for improvement plans.
 
-Faithful adaptation of the Socrates-EM dual-loop architecture for MLEvolve's
-planning pipeline. Key architectural properties (matching the reference):
+Socrates (PI) reviews plans with on-demand access to global memory via a
+sub-agent tool. Key architectural properties:
 
-1. Socrates (PI) maintains PERSISTENT conversation history across ALL review
-   calls — accumulates trajectory knowledge over the entire search.
-2. Planner (scientist) gets fresh context each review call — resets per session.
-3. Multi-turn discussion within each review round — Socrates sees its own prior
-   questions and the planner's responses (not single-turn isolated calls).
+1. Local message scope — each review_plan() call gets fresh session messages,
+   bounded by max_rounds. No cross-review message accumulation.
+2. Within a single review, multi-turn is fine (Socrates sees its own prior
+   questions + planner responses for this session).
+3. Cross-review context comes from the analyze_past_attempts tool, which
+   retrieves from GlobalMemoryLayer and uses an LLM sub-agent to analyze.
 4. [APPROVED] gate before plan proceeds to coding.
-
-Inserted between generate_initial_plan() and refine_plan_to_json() in the
-improve agent's two-stage planning pipeline.
+5. Socrates is told the planner does NOT have history of past results —
+   only Socrates can access that via tools.
 """
 
 import logging
 
-from llm import chat as llm_chat
+from llm import chat as llm_chat, agentic_chat
 
 logger = logging.getLogger("MLEvolve")
 
 
 # ---------------------------------------------------------------------------
-# System prompts (matching reference socrates/prompts.py)
+# System prompts
 # ---------------------------------------------------------------------------
 
 SOCRATES_A_SYSTEM = (
     "You are Socrates A, a PI (advisor) to a machine learning planning agent "
     "solving a Kaggle challenge.\n\n"
+    "IMPORTANT CONTEXT: The planning agent does NOT have access to the history "
+    "of past experiment results, scores, or previously tried approaches. Only "
+    "you have that access via the analyze_past_attempts tool. The planner is "
+    "working from its current context alone. Use your tool to look up what has "
+    "been tried before, then question the planner about whether their proposed "
+    "approach is truly different and whether they've considered the failure "
+    "modes of similar past attempts.\n\n"
     "Your focus areas:\n"
     "- Statistical methodology and rigor\n"
     "- Experimental design and validation strategy\n"
@@ -35,10 +42,12 @@ SOCRATES_A_SYSTEM = (
     "- Model selection justification\n"
     "- Potential data leakage or overfitting risks\n"
     "- Whether the proposed improvement is meaningfully different from "
-    "past attempts\n\n"
+    "past attempts (use your tool to verify)\n\n"
     "Your role:\n"
+    "- Use analyze_past_attempts to check what has been tried and what "
+    "worked or failed before asking questions\n"
     "- Ask probing questions to help the planning agent think deeply "
-    "about METHODOLOGY\n"
+    "about METHODOLOGY — ground your questions in actual past results\n"
     "- Do NOT give solutions or suggestions, only ask questions\n"
     "- Help the agent take a step back and reflect on the overall "
     "direction, methods, and alternatives\n\n"
@@ -61,14 +70,11 @@ PLANNER_RESPOND_SYSTEM = (
 
 
 # ---------------------------------------------------------------------------
-# Prompt builders (matching reference socrates/prompts.py structure)
+# Prompt builders
 # ---------------------------------------------------------------------------
 
 def _pi_initial_review_prompt(plan_text, task_desc, parent_output, child_memory):
-    """Prompt for PI's first review of the planner's report.
-
-    Matches reference get_pi_initial_review_prompt().
-    """
+    """Prompt for PI's first review of the planner's report."""
     parts = [
         "The planning agent presents:\n",
         "--- PLAN ---",
@@ -81,19 +87,18 @@ def _pi_initial_review_prompt(plan_text, task_desc, parent_output, child_memory)
     if child_memory and str(child_memory).strip():
         parts.append(f"Previous attempts:\n{child_memory}\n")
     parts.append(
-        "First, verify the plan is methodologically sound and proposes a "
+        "First, use your analyze_past_attempts tool to check what similar "
+        "approaches have been tried before and their outcomes.\n"
+        "Then verify the plan is methodologically sound and proposes a "
         "meaningfully different approach from previous attempts.\n"
-        "Then ask 2-3 probing questions about the methodology, "
+        "Ask 2-3 probing questions about the methodology, "
         "OR if the plan is solid, respond with [APPROVED]."
     )
     return "\n".join(parts)
 
 
 def _pi_followup_review_prompt(planner_response):
-    """Prompt for PI's follow-up review after planner responds.
-
-    Matches reference get_pi_followup_review_prompt().
-    """
+    """Prompt for PI's follow-up review after planner responds."""
     return (
         "The planning agent responds:\n\n"
         "--- RESPONSE ---\n"
@@ -105,10 +110,7 @@ def _pi_followup_review_prompt(planner_response):
 
 
 def _scientist_respond_prompt(pi_response, plan_text, task_desc):
-    """Prompt for planner to respond to PI questions.
-
-    Matches reference get_scientist_respond_to_pi_prompt().
-    """
+    """Prompt for planner to respond to PI questions."""
     return (
         "Socrates (your methodology reviewer) asks:\n\n"
         f"{pi_response}\n\n"
@@ -123,27 +125,120 @@ def _scientist_respond_prompt(pi_response, plan_text, task_desc):
 
 
 # ---------------------------------------------------------------------------
-# Persistent Socrates state (mirrors reference: PI persists across sessions)
+# Sub-agent tool definition + executor
+# ---------------------------------------------------------------------------
+
+ANALYZE_ATTEMPTS_TOOL = {
+    "name": "analyze_past_attempts",
+    "description": (
+        "Search the experiment memory for past improvement attempts. "
+        "Returns matching records with their plans, code approaches, "
+        "metric scores, and outcomes (success/failure), plus an LLM-powered "
+        "analysis of patterns. Use this to understand what has been tried "
+        "before and what worked or failed."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": (
+                    "Search query describing the approach or technique to "
+                    "look up (e.g. 'feature engineering', 'ensemble methods', "
+                    "'learning rate tuning', 'attention mechanism')"
+                ),
+            },
+            "include_failures": {
+                "type": "boolean",
+                "description": "Include failed attempts in results. Default true.",
+            },
+        },
+        "required": ["query"],
+    },
+}
+
+
+def _execute_tool(name, input_data, global_memory, cfg):
+    """Execute Socrates tool call. Sub-agent: retrieves from memory, uses LLM to analyze."""
+    if name != "analyze_past_attempts":
+        return f"Unknown tool: {name}"
+
+    if global_memory is None or not global_memory.records:
+        return "No memory data available. This is an early stage of the search with no prior attempts recorded."
+
+    query = input_data.get("query", "")
+    include_failures = input_data.get("include_failures", True)
+
+    results = global_memory.retrieve_similar_records(query_text=query, top_k=5, alpha=0.5)
+
+    if not results:
+        return f"No matching records found for query: '{query}'"
+
+    # Basic stats
+    total = len(global_memory.records)
+    successes = sum(1 for r in global_memory.records if r.label == 1)
+    failures = sum(1 for r in global_memory.records if r.label == -1)
+
+    formatted = [f"Memory stats: {total} total attempts ({successes} successful, {failures} failed)\n"]
+
+    for i, (record, score) in enumerate(results, 1):
+        if not include_failures and record.label == -1:
+            continue
+
+        meta = global_memory.node_metadata_map.get(record.record_id, {})
+        label_str = {1: "SUCCESS", 0: "NEUTRAL", -1: "FAILURE"}.get(record.label, "UNKNOWN")
+
+        entry = f"### Attempt #{i} [{label_str}]\n"
+        entry += f"**Stage:** {record.title}\n"
+        entry += f"**Plan/Approach:** {record.description}\n"
+        entry += f"**Code Summary:** {record.method}\n"
+
+        pm = meta.get("parent_metric")
+        cm = meta.get("current_metric")
+        if pm is not None and cm is not None:
+            entry += f"**Score:** {pm} → {cm}\n"
+        elif cm is not None:
+            entry += f"**Score:** {cm}\n"
+
+        formatted.append(entry)
+
+    if len(formatted) <= 1:
+        return "No matching records found after filtering."
+
+    records_text = "\n".join(formatted)
+
+    # Sub-agent: LLM-powered analysis of retrieved records
+    analysis = llm_chat(
+        messages=[{"role": "user", "content": (
+            f"Analyze these past ML experiment attempts:\n\n{records_text}\n\n"
+            "Provide a concise analysis:\n"
+            "1. What approaches were tried and their code strategies\n"
+            "2. What worked vs failed and why (based on score changes)\n"
+            "3. Score trends across attempts\n"
+            "4. Key insights for deciding whether a new proposal is novel"
+        )}],
+        system_message="You are a concise ML experiment analyst. Be brief and actionable.",
+        model=cfg.agent.feedback.model,
+        temperature=0.3,
+        cfg=cfg,
+    )
+
+    return f"{records_text}\n---\n**Analysis:** {analysis}"
+
+
+# ---------------------------------------------------------------------------
+# Socrates state (tracking only, no message accumulation)
 # ---------------------------------------------------------------------------
 
 class SocratesState:
-    """Persistent state for Socrates reviewer across all review calls.
+    """Tracking state for Socrates reviewer across all review calls.
 
-    Mirrors the reference architecture where Socrates agents persist across
-    all sessions while the scientist (planner) resets each session.
-
-    In the reference:
-    - Socrates A/B are created once and live across all sessions
-    - Their conversation context accumulates trajectory knowledge
-    - The scientist gets a fresh context each session
-
-    Here:
-    - pi_messages accumulates across all review_plan() calls
-    - Each review_plan() call creates fresh planner context (scientist reset)
+    No message accumulation — each review gets fresh local messages.
+    Cross-review context comes from the analyze_past_attempts tool
+    querying GlobalMemoryLayer on demand.
     """
 
     def __init__(self):
-        self.pi_messages = []  # Socrates A conversation history (persists)
         self.total_reviews = 0
         self.total_approvals = 0
         self.total_rounds = 0
@@ -158,11 +253,10 @@ class SocratesState:
 
 
 # ---------------------------------------------------------------------------
-# Core discussion loop (matching reference discussion_until_approval)
+# Core discussion loop
 # ---------------------------------------------------------------------------
 
 def discussion_until_approval(
-    pi_messages,
     plan_text,
     task_desc,
     parent_output,
@@ -170,35 +264,31 @@ def discussion_until_approval(
     agent_instance,
     max_rounds=3,
 ):
-    """Inner loop: Planner and Socrates discuss until Socrates approves.
+    """Socrates and planner discuss until [APPROVED] or max_rounds.
 
-    Faithfully mirrors the reference discussion_until_approval():
-    - PI (Socrates) uses multi-turn conversation (pi_messages persists and
-      accumulates across rounds AND across calls)
-    - Planner responds to questions (fresh context per call, like scientist
-      resetting per session)
-    - Loop until [APPROVED] or max_rounds reached
-
-    Args:
-        pi_messages: Socrates conversation history (mutated in-place,
-            persists across calls via SocratesState).
-        plan_text: Initial plan text to review.
-        task_desc: Task description.
-        parent_output: Previous execution output.
-        child_memory: Memory of previous sibling attempts.
-        agent_instance: AgentSearch instance for LLM config.
-        max_rounds: Max discussion rounds before forcing through.
+    Messages are local to this review call (bounded by max_rounds).
+    Socrates has tool access to query global memory for past attempts.
+    Planner gets fresh single-turn context each round.
 
     Returns:
         (final_plan_text, approved, rounds_used)
     """
     current_plan = plan_text
     planner_response = ""
+    session_messages = []  # local to this review
+
+    # Tool setup — only if global memory has data
+    global_memory = getattr(agent_instance, 'global_memory', None)
+    has_memory = global_memory is not None and len(global_memory.records) > 0
+    tools = [ANALYZE_ATTEMPTS_TOOL] if has_memory else None
+    tool_executor = (
+        lambda name, inp: _execute_tool(name, inp, global_memory, agent_instance.cfg)
+    ) if has_memory else None
 
     for round_num in range(max_rounds):
         logger.info(f"[Socrates] Discussion round {round_num + 1}/{max_rounds}")
 
-        # --- Socrates reviews (multi-turn: sees full conversation history) ---
+        # --- Socrates reviews (multi-turn within this session) ---
         if round_num == 0:
             user_msg = _pi_initial_review_prompt(
                 current_plan, task_desc, parent_output, child_memory,
@@ -206,20 +296,17 @@ def discussion_until_approval(
         else:
             user_msg = _pi_followup_review_prompt(planner_response)
 
-        pi_messages.append({"role": "user", "content": user_msg})
+        session_messages.append({"role": "user", "content": user_msg})
 
-        socrates_response = llm_chat(
-            messages=pi_messages,
+        socrates_response, session_messages = agentic_chat(
+            messages=session_messages,
             system_message=SOCRATES_A_SYSTEM,
+            tools=tools,
+            tool_executor=tool_executor,
+            cfg=agent_instance.cfg,
             model=agent_instance.acfg.feedback.model,
             temperature=agent_instance.acfg.feedback.temp,
-            cfg=agent_instance.cfg,
         )
-
-        if not isinstance(socrates_response, str):
-            socrates_response = str(socrates_response)
-
-        pi_messages.append({"role": "assistant", "content": socrates_response})
 
         # Check for approval
         if "[APPROVED]" in socrates_response.upper():
@@ -233,7 +320,7 @@ def discussion_until_approval(
             f"planner responding"
         )
 
-        # --- Planner defends/revises (fresh context, like scientist reset) ---
+        # --- Planner defends/revises (fresh single-turn context) ---
         planner_user_msg = _scientist_respond_prompt(
             socrates_response, current_plan, task_desc,
         )
@@ -276,21 +363,9 @@ def review_plan(
 ):
     """Socrates review loop for improvement plans.
 
-    Faithful to the reference Socrates-EM architecture:
-    - Socrates maintains persistent conversation history (via socrates_state)
-    - Planner gets fresh context each call (scientist resets per session)
-    - Multi-turn discussion within each review
-    - [APPROVED] gate before plan proceeds to coding
-
-    Args:
-        agent_instance: AgentSearch instance.
-        plan_text: The initial free-text plan to review.
-        task_desc: Competition / task description.
-        data_preview: Data preview string.
-        parent_output: Parent node's execution output (str or list).
-        child_memory: Memory of previous sibling attempts.
-        max_rounds: Maximum discussion rounds before proceeding anyway.
-        socrates_state: Persistent SocratesState (pass from AgentSearch).
+    Each call gets fresh local messages (bounded by max_rounds).
+    Socrates queries global memory on-demand via tool access.
+    Planner gets fresh context each round (no history access).
 
     Returns:
         tuple: (final_plan_text: str, approved: bool, rounds_used: int)
@@ -305,15 +380,10 @@ def review_plan(
     else:
         parent_output = str(parent_output) if parent_output else ""
 
-    # Get or create persistent Socrates state
     if socrates_state is None:
         socrates_state = SocratesState()
 
-    pi_messages = socrates_state.pi_messages
-
-    # Run the discussion loop (mirrors reference discussion_until_approval)
     final_plan, approved, rounds = discussion_until_approval(
-        pi_messages=pi_messages,
         plan_text=plan_text,
         task_desc=task_desc,
         parent_output=parent_output,
@@ -322,7 +392,6 @@ def review_plan(
         max_rounds=max_rounds,
     )
 
-    # Update persistent state
     socrates_state.total_reviews += 1
     socrates_state.total_rounds += rounds
     if approved:

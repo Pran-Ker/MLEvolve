@@ -94,6 +94,31 @@ def chat(
     )
 
 
+def agentic_chat(
+    messages: list[dict],
+    system_message: str | None = None,
+    tools: list[dict] | None = None,
+    tool_executor=None,
+    cfg: Config = None,
+    model: str | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    max_tool_rounds: int = 5,
+) -> tuple[str, list[dict]]:
+    """Agentic chat with tool-use loop (Claude backend only)."""
+    return _claude.agentic_chat(
+        messages=messages,
+        system_message=system_message,
+        tools=tools,
+        tool_executor=tool_executor,
+        cfg=cfg,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        max_tool_rounds=max_tool_rounds,
+    )
+
+
 def generate(
     prompt: str | dict | list,
     cfg: Config,
