@@ -14,7 +14,10 @@ sub-agent tool. Key architectural properties:
    only Socrates can access that via tools.
 """
 
+import json
 import logging
+import time
+from pathlib import Path
 
 from llm import chat as llm_chat, agentic_chat
 
@@ -253,6 +256,30 @@ class SocratesState:
 
 
 # ---------------------------------------------------------------------------
+# Transcript persistence
+# ---------------------------------------------------------------------------
+
+def _save_transcript(agent_instance, original_plan, transcript, approved, rounds):
+    """Append a Socrates review transcript to the log directory."""
+    log_dir = getattr(agent_instance.cfg, 'log_dir', None)
+    if log_dir is None:
+        return
+    log_dir = Path(log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    out_file = log_dir / "socrates_transcripts.jsonl"
+    entry = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "original_plan": original_plan[:500],
+        "approved": approved,
+        "rounds": rounds,
+        "transcript": transcript,
+    }
+    with open(out_file, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+    logger.info(f"[Socrates] Transcript saved ({rounds} rounds, approved={approved})")
+
+
+# ---------------------------------------------------------------------------
 # Core discussion loop
 # ---------------------------------------------------------------------------
 
@@ -276,6 +303,7 @@ def discussion_until_approval(
     current_plan = plan_text
     planner_response = ""
     session_messages = []  # local to this review
+    transcript = []  # structured Q&A log for dashboard
 
     # Tool setup — only if global memory has data
     global_memory = getattr(agent_instance, 'global_memory', None)
@@ -313,6 +341,8 @@ def discussion_until_approval(
             logger.info(
                 f"[Socrates] Plan APPROVED after {round_num + 1} round(s)"
             )
+            transcript.append({"round": round_num + 1, "socrates": socrates_response, "planner": None, "approved": True})
+            _save_transcript(agent_instance, plan_text, transcript, approved=True, rounds=round_num + 1)
             return current_plan, True, round_num + 1
 
         logger.info(
@@ -336,6 +366,8 @@ def discussion_until_approval(
         if not isinstance(planner_response, str):
             planner_response = str(planner_response)
 
+        transcript.append({"round": round_num + 1, "socrates": socrates_response, "planner": planner_response, "approved": False})
+
         # Update current plan with revised version
         if planner_response and len(planner_response.strip()) > 20:
             current_plan = planner_response.strip()
@@ -344,6 +376,7 @@ def discussion_until_approval(
         f"[Socrates] Max rounds ({max_rounds}) reached without "
         f"approval, proceeding anyway"
     )
+    _save_transcript(agent_instance, plan_text, transcript, approved=False, rounds=max_rounds)
     return current_plan, False, max_rounds
 
 
