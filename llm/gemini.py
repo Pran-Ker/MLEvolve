@@ -199,6 +199,45 @@ def query(
         raise e
 
 
+def chat(
+    messages: list[dict],
+    system_message: str | None = None,
+    cfg: Config = None,
+    model: str | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> str:
+    """Multi-turn chat with full message history (Gemini backend).
+
+    Gemini doesn't natively support multi-turn with roles the same way,
+    so we concatenate the conversation into a single prompt.
+    """
+    _setup_gemini_client(cfg)
+
+    parts = []
+    if system_message:
+        parts.append(f"[System]\n{system_message}\n")
+    for msg in messages:
+        role_label = "User" if msg["role"] == "user" else "Assistant"
+        parts.append(f"[{role_label}]\n{msg['content']}\n")
+    contents = "\n".join(parts)
+
+    model_name = model or cfg.agent.code.model
+
+    config_params = {
+        "temperature": temperature if temperature is not None else 1.0,
+        "max_output_tokens": max_tokens or 16384,
+    }
+    generation_config = types.GenerateContentConfig(**config_params)
+
+    response = _client.models.generate_content(
+        model=model_name,
+        contents=contents,
+        config=generation_config,
+    )
+    return response.text
+
+
 def generate(
     prompt: str | dict | list,
     cfg: Config,

@@ -83,6 +83,13 @@ class AgentSearch:
         self.metric_maximize_reasoning: str | None = None
         result_parse_agent.determine_metric_direction(self)
 
+        # Socrates persistent state (PI persists across all sessions)
+        self.socrates_state = None
+        if getattr(self.acfg, 'use_socrates_review', False):
+            from agents.socrates_review import SocratesState
+            self.socrates_state = SocratesState()
+            logger.info("[AgentSearch] Socrates persistent state initialized")
+
         # Global memory
         self.global_memory = None
         if self.acfg.use_global_memory:

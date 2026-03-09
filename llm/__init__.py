@@ -1,8 +1,13 @@
 import logging
 from . import gemini as _gemini
-from .gemini import FunctionSpec, OutputType, PromptType, compile_prompt_to_md, generate
+from . import claude as _claude
+from .gemini import FunctionSpec, OutputType, PromptType, compile_prompt_to_md
 from config import Config
 logger = logging.getLogger("MLEvolve")
+
+
+def _is_claude(model: str) -> bool:
+    return model.startswith("claude")
 
 
 def query(
@@ -53,7 +58,9 @@ def query(
     if func_spec:
         logger.info(f"function spec: {func_spec.to_dict()}", extra={"verbose": True})
 
-    output, req_time, in_tok_count, out_tok_count, info = _gemini.query(
+    backend = _claude if _is_claude(model) else _gemini
+
+    output, req_time, in_tok_count, out_tok_count, info = backend.query(
         system_message=system_message,
         user_message=user_message,
         func_spec=func_spec,
@@ -63,3 +70,50 @@ def query(
     logger.info("---Query complete---", extra={"verbose": True})
 
     return output
+
+
+def chat(
+    messages: list[dict],
+    system_message: str | None = None,
+    model: str | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    cfg: Config = None,
+) -> str:
+    """Multi-turn chat dispatched to the correct backend based on model name."""
+    if model is None:
+        model = cfg.agent.code.model
+    backend = _claude if _is_claude(model) else _gemini
+    return backend.chat(
+        messages=messages,
+        system_message=system_message,
+        cfg=cfg,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+
+def generate(
+    prompt: str | dict | list,
+    cfg: Config,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    stop_tokens: list[str] | None = None,
+    json_schema: dict | None = None,
+    max_retries: int = 20,
+    retry_delay: float = 3,
+) -> str:
+    """Dispatch generate() to the correct backend based on model name."""
+    model = cfg.agent.code.model
+    backend = _claude if _is_claude(model) else _gemini
+    return backend.generate(
+        prompt=prompt,
+        cfg=cfg,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        stop_tokens=stop_tokens,
+        json_schema=json_schema,
+        max_retries=max_retries,
+        retry_delay=retry_delay,
+    )

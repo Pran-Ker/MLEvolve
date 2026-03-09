@@ -198,13 +198,17 @@ class Interpreter:
         
         try:
             cpu_number_per_session = max(1, int(self.cpu_number / self.max_parallel_run))
-            avail_cpus = sorted(os.sched_getaffinity(0))
-            start = process_id * cpu_number_per_session
-            cpu_set = set(avail_cpus[start:start + cpu_number_per_session])
-            if not cpu_set:
-                cpu_set = set(avail_cpus)
-            logger.info(f"has set process_id:{process_id} to use cpu: {cpu_set}")
-            pre_code = "import os\nos.sched_setaffinity(0, {cpu_set})\n".format(cpu_set=cpu_set)
+            if hasattr(os, 'sched_getaffinity'):
+                avail_cpus = sorted(os.sched_getaffinity(0))
+                start = process_id * cpu_number_per_session
+                cpu_set = set(avail_cpus[start:start + cpu_number_per_session])
+                if not cpu_set:
+                    cpu_set = set(avail_cpus)
+                logger.info(f"has set process_id:{process_id} to use cpu: {cpu_set}")
+                pre_code = "import os\nos.sched_setaffinity(0, {cpu_set})\n".format(cpu_set=cpu_set)
+            else:
+                logger.info(f"os.sched_getaffinity not available (macOS), skipping CPU affinity for process_id:{process_id}")
+                pre_code = ""
 
             code = self.isolate_submission_path(code=code, _id=id)
             code = self.isolate_model_path(code=code, _id=id)

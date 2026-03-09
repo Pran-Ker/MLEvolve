@@ -97,6 +97,8 @@ class AgentConfig:
     search: SearchConfig
     decay: DecayConfig
     use_diff_mode: bool = True
+    use_socrates_review: bool = False
+    socrates_max_rounds: int = 3
 @dataclass
 class ExecConfig:
     timeout: int

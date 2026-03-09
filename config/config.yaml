@@ -44,15 +44,15 @@ agent:
 
   # --- LLM models ---
   code:
-    model: gemini-3-pro-preview
+    model: claude-sonnet-4-20250514
     temp: 1
-    base_url: ""   # Gemini API endpoint
-    api_key: ""    # Gemini API key
+    base_url: ""
+    api_key: ""    # Will use ANTHROPIC_API_KEY env var
   feedback:
-    model: gemini-3-pro-preview
+    model: claude-sonnet-4-20250514
     temp: 1
-    base_url: ""   # Gemini API endpoint
-    api_key: ""    # Gemini API key
+    base_url: ""
+    api_key: ""    # Will use ANTHROPIC_API_KEY env var
 
   # --- Submission check ---
   check_data_leakage: True
@@ -60,15 +60,19 @@ agent:
   # --- Code gen mode ---
   use_diff_mode: True                # SEARCH/REPLACE patch
 
+  # --- Socrates methodology review ---
+  use_socrates_review: True          # Enable Socrates A plan review loop
+  socrates_max_rounds: 3             # Max discussion rounds before proceeding
+
   # --- Branch strategy ---
   fusion_vs_evolution_prob: 0.3
   branch_fusion_trigger_prob: 1.0
   max_fusion_drafts: 2
 
   # --- Global memory ---
-  use_global_memory: False
+  use_global_memory: True
   memory_similarity_threshold: 0.7
-  memory_embedding_device: cuda
+  memory_embedding_device: cpu
   memory_embedding_model_path: "BAAI/bge-base-en-v1.5"  # HuggingFace model name or local path
 
   # --------------------------------------------------------
@@ -77,7 +81,7 @@ agent:
   search:
     # Parallel & resources
     parallel_search_num: 3
-    num_gpus: 1
+    num_gpus: 0
 
     # Node expansion limits
     num_drafts: 5

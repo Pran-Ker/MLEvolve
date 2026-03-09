@@ -18,6 +18,7 @@ from agents.prompts import (
 from agents.planner import run_planner, generate_initial_plan, refine_plan_to_json, build_planner_task, build_planner_suffix
 from agents.coder import plan_and_code_query
 from agents.coder.diff_coder import diff_generate_and_apply
+from agents.socrates_review import review_plan
 
 logger = logging.getLogger("MLEvolve")
 
@@ -304,6 +305,25 @@ def _diff_improve(agent, prompt_base, data_preview, parent_node):
     if use_memory:
         logger.info("[DiffImprove] Using two-stage planning with memory")
         initial_plan = generate_initial_plan(agent, prompt_base, data_preview, context)
+
+        if getattr(agent.acfg, 'use_socrates_review', False):
+            exec_output = context.get('execution_output', '')
+            if isinstance(exec_output, list):
+                parent_output_str = '\n'.join(str(x) for x in exec_output)
+            else:
+                parent_output_str = str(exec_output)
+            initial_plan, approved, rounds = review_plan(
+                agent_instance=agent,
+                plan_text=initial_plan,
+                task_desc=agent.task_desc,
+                data_preview=data_preview,
+                parent_output=parent_output_str,
+                child_memory=prompt_base.get("Memory", ""),
+                max_rounds=getattr(agent.acfg, 'socrates_max_rounds', 3),
+                socrates_state=getattr(agent, 'socrates_state', None),
+            )
+            logger.info(f"[Socrates] Review complete: approved={approved}, rounds={rounds}")
+
         planning_result = refine_plan_to_json(agent, initial_plan, prompt_base, data_preview, context)
     else:
         logger.info("[DiffImprove] Using direct planner (memory disabled or empty)")
