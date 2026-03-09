@@ -1,5 +1,6 @@
 import atexit
 import logging
+import sys
 import shutil
 import time
 import threading
@@ -114,7 +115,9 @@ def run():
                 logger.exception(f"❌ Exception during draft node {node.id} execution: {e}")
                 return None
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        interrupted = False
+        try:
             futures = set()
             for i, node in enumerate(pending_draft_nodes):
                 futures.add(executor.submit(execute_draft_node, node))
@@ -123,7 +126,6 @@ def run():
                     time.sleep(10)
                     logger.info(f"⏱️  Waiting 10s before next draft to stagger initialization...")
 
-
             initial_step_tasks = min(max_workers, total_steps - completed) - len(pending_draft_nodes)
             if initial_step_tasks > 0:
                 for _ in range(initial_step_tasks):
@@ -131,7 +133,10 @@ def run():
                     logger.info(f"📤 Submitted initial step_task to fill thread pool")
 
             while completed < total_steps:
-                done, _ = wait(futures, return_when=FIRST_COMPLETED)
+                done, _ = wait(futures, return_when=FIRST_COMPLETED, timeout=1.0)
+
+                if not done:
+                    continue  # timeout, no completed futures, retry (allows SIGINT handling)
 
                 for fut in done:
                     futures.remove(fut)
@@ -155,6 +160,15 @@ def run():
                         futures.add(executor.submit(step_task, cur_node))
                         logger.info(f"📤 Submitted next task based on node {cur_node.id if cur_node else 'None'}")
                     logger.info(f"📊 Progress: {completed}/{total_steps} steps completed, {len(futures)} tasks running")
+        except KeyboardInterrupt:
+            interrupted = True
+            logger.info("KeyboardInterrupt received, terminating subprocesses and shutting down...")
+            interpreter.terminate_all_subprocesses()
+            executor.shutdown(wait=False, cancel_futures=True) if sys.version_info >= (3, 9) else executor.shutdown(wait=False)
+            raise
+        finally:
+            if not interrupted:
+                executor.shutdown(wait=True)
     else:
         logger.info(f"✅ All steps completed in Phase 1 (total_steps={total_steps} <= initial_draft_count={initial_draft_count})")
 

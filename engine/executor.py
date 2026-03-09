@@ -9,6 +9,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 import traceback
 import subprocess
@@ -73,6 +74,25 @@ class Interpreter:
                 "ensure that each process has at least one CPU core."
             )
         self.lock = Lock()
+        self._procs_lock = threading.Lock()
+        self._active_procs: dict[int, subprocess.Popen] = {}
+
+    def terminate_all_subprocesses(self) -> None:
+        """Terminate all active subprocesses (for graceful Ctrl+C exit)."""
+        with self._procs_lock:
+            procs = list(self._active_procs.items())
+            self._active_procs.clear()
+        for slot_id, proc in procs:
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+            except Exception as e:
+                logger.warning(f"Error terminating subprocess slot {slot_id}: {e}")
 
     def check_current_status(self):
         """Check current parallel run number."""
@@ -207,6 +227,8 @@ class Interpreter:
                 bufsize=1,
                 env={**os.environ, "PYTHONUNBUFFERED": "1"},
             )
+            with self._procs_lock:
+                self._active_procs[process_id] = proc
 
             child_in_overtime = False
             exc_type = None
@@ -335,6 +357,9 @@ class Interpreter:
                 exc_stack=[],
             )
         finally:
+            if process_id is not None:
+                with self._procs_lock:
+                    self._active_procs.pop(process_id, None)
             if proc is not None:
                 try:
                     if proc.poll() is None:
