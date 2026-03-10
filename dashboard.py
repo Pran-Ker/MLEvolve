@@ -289,7 +289,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h2>Overview</h2>
     <div class="kpi-row">
       <div class="kpi"><div class="label">Steps</div><div class="value accent" id="kpiSteps">-</div></div>
-      <div class="kpi"><div class="label">Best Metric</div><div class="value green" id="kpiBest">-</div></div>
+      <div class="kpi"><div class="label">Best Train-Val Score</div><div class="value green" id="kpiBest">-</div></div>
       <div class="kpi"><div class="label">Good Nodes</div><div class="value green" id="kpiGood">-</div></div>
       <div class="kpi"><div class="label">Buggy Nodes</div><div class="value red" id="kpiBuggy">-</div></div>
       <div class="kpi"><div class="label">Pending</div><div class="value orange" id="kpiPending">-</div></div>
@@ -297,7 +297,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
   </div>
   <div class="card">
-    <h2>Metric Progression</h2>
+    <h2>Train-Val Score Progression</h2>
     <div class="chart-box"><canvas id="metricChart"></canvas></div>
   </div>
   <div class="card">
@@ -309,7 +309,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="table-scroll">
       <table class="node-table">
         <thead><tr>
-          <th>Step</th><th>ID</th><th>Stage</th><th>Metric</th><th>Buggy</th><th>Exec Time</th><th>Time</th><th>Plan</th>
+          <th>Step</th><th>ID</th><th>Stage</th><th>Train-Val</th><th>Buggy</th><th>Exec Time</th><th>Time</th><th>Plan</th>
         </tr></thead>
         <tbody id="nodeTableBody"></tbody>
       </table>
@@ -429,6 +429,10 @@ function render(d) {
   renderSocrates(d.socrates || []);
 }
 
+// Track which Socrates sessions the user has manually toggled
+let socratesOpenState = {};  // keyed by session num, true = open
+let socratesInitialized = false;
+
 function renderSocrates(sessions) {
   const container = document.getElementById('socratesList');
   const countEl = document.getElementById('socratesCount');
@@ -436,7 +440,15 @@ function renderSocrates(sessions) {
 
   if (sessions.length === 0) {
     container.innerHTML = '<div class="no-socrates">No Socrates reviews yet. They appear once improve nodes trigger the review loop.</div>';
+    socratesInitialized = false;
     return;
+  }
+
+  // On first render, default newest open
+  if (!socratesInitialized) {
+    socratesOpenState = {};
+    socratesOpenState[sessions.length] = true;
+    socratesInitialized = true;
   }
 
   container.innerHTML = '';
@@ -444,7 +456,8 @@ function renderSocrates(sessions) {
   sessions.slice().reverse().forEach((session, idx) => {
     const num = sessions.length - idx;
     const div = document.createElement('div');
-    div.className = 'socrates-session' + (idx === 0 ? ' open' : '');
+    const isOpen = socratesOpenState[num] === true;
+    div.className = 'socrates-session' + (isOpen ? ' open' : '');
 
     const approvedClass = session.approved ? 'yes' : 'no';
     const approvedText = session.approved ? 'APPROVED' : 'NOT APPROVED';
@@ -477,9 +490,11 @@ function renderSocrates(sessions) {
 
     div.innerHTML = headerHtml + bodyHtml;
 
-    // Toggle open/close
+    // Toggle open/close — persist to state so refresh preserves it
     div.querySelector('.socrates-session-header').addEventListener('click', () => {
+      const nowOpen = !div.classList.contains('open');
       div.classList.toggle('open');
+      socratesOpenState[num] = nowOpen;
     });
 
     container.appendChild(div);
@@ -503,7 +518,7 @@ function renderMetricChart(bp) {
       plugins: { legend: { labels: { color: '#8b949e', font: { size: 11 } } } },
       scales: {
         x: { title: { display: true, text: 'Step', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.5)' } },
-        y: { title: { display: true, text: 'Metric', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.5)' } }
+        y: { title: { display: true, text: 'Train-Val Score', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.5)' } }
       }
     }
   });
@@ -529,6 +544,8 @@ function escapeHtml(s) {
 
 document.getElementById('runSelect').addEventListener('change', e => {
   currentRun = e.target.value;
+  socratesOpenState = {};
+  socratesInitialized = false;
   loadRun(currentRun);
 });
 
