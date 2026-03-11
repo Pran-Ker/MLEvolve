@@ -72,15 +72,15 @@ CUDA_VISIBLE_DEVICES=$MEMORY_INDEX timeout --foreground --signal=TERM --kill-aft
   start_cpu_id="${start_cpu}" \
   cpu_number="${CPUS_PER_TASK}"
 
+RUN_EXIT=$?
+
 if [ $RUN_EXIT -eq 124 ]; then
   echo "Timed out after $TIME_LIMIT"
-  exit 124
 elif [ $RUN_EXIT -eq 130 ]; then
   echo "Interrupted."
   exit 130
 elif [ $RUN_EXIT -ne 0 ]; then
   echo "Run failed with exit code: $RUN_EXIT"
-  exit $RUN_EXIT
 fi
 
 # ── Post-processing: ensemble top solutions ──
