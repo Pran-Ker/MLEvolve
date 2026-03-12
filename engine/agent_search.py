@@ -86,7 +86,7 @@ class AgentSearch:
         # Socrates persistent state (PI persists across all sessions)
         self.socrates_state = None
         if getattr(self.acfg, 'use_socrates_review', False):
-            from agents.socrates_review import SocratesState
+            from agents.socrates import SocratesState
             self.socrates_state = SocratesState()
             logger.info("[AgentSearch] Socrates persistent state initialized")
 

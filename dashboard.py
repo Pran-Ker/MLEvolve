@@ -5,7 +5,8 @@ Usage: .venv/bin/python dashboard.py [--port 8050]
 import json
 import argparse
 from pathlib import Path
-from flask import Flask, jsonify, send_from_directory
+from datetime import datetime
+from flask import Flask, jsonify
 
 app = Flask(__name__)
 RUNS_DIR = Path("runs")
@@ -62,6 +63,110 @@ def load_socrates_transcripts(run_name):
     return entries
 
 
+def get_exp_id(run_name):
+    cfg_text = load_config(run_name)
+    if not cfg_text:
+        return None
+    for line in cfg_text.splitlines():
+        if line.startswith("exp_id:"):
+            return line.split(":", 1)[1].strip()
+    return None
+
+
+def get_dataset_dir(run_name):
+    cfg_text = load_config(run_name)
+    if not cfg_text:
+        return None
+    lines = cfg_text.splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith("dataset_dir:"):
+            value_part = line.split(":", 1)[1].strip()
+            if value_part and not value_part.startswith("!!"):
+                return value_part
+            parts = []
+            for j in range(i + 1, len(lines)):
+                if lines[j].startswith("- "):
+                    parts.append(lines[j][2:].strip())
+                else:
+                    break
+            parts = [p for p in parts if p]
+            if parts:
+                return str(Path(*parts))
+    return None
+
+
+def load_test_scores(run_name):
+    path = RUNS_DIR / run_name / "logs" / "test_scores.json"
+    if not path.exists():
+        return None
+    with open(path) as f:
+        return json.load(f)
+
+
+def grade_run(run_name):
+    try:
+        from mlebench.grade import grade_csv
+        from mlebench.registry import registry
+    except ImportError:
+        return {"error": "mlebench is not installed"}
+
+    exp_id = get_exp_id(run_name)
+    dataset_dir = get_dataset_dir(run_name)
+    if not exp_id or not dataset_dir:
+        return {"error": "Missing exp_id or dataset_dir in config"}
+
+    comp = registry.set_data_dir(Path(dataset_dir)).get_competition(exp_id)
+
+    sub_dir = RUNS_DIR / run_name / "workspace" / "submission"
+    if not sub_dir.exists():
+        return {"error": "No submission directory found"}
+
+    scores = {}
+    thresholds = None
+    is_lower_better = None
+
+    for csv_path in sorted(sub_dir.glob("submission_*.csv")):
+        node_id = csv_path.stem.replace("submission_", "")
+        short_id = node_id[:8]
+        try:
+            report = grade_csv(csv_path, comp)
+        except Exception:
+            scores[short_id] = {"score": None, "medal": None}
+            continue
+
+        if thresholds is None:
+            thresholds = {
+                "gold": report.gold_threshold,
+                "silver": report.silver_threshold,
+                "bronze": report.bronze_threshold,
+                "median": report.median_threshold,
+            }
+            is_lower_better = report.is_lower_better
+
+        if report.valid_submission and report.score is not None:
+            medal = ("GOLD" if report.gold_medal else
+                     "SILVER" if report.silver_medal else
+                     "BRONZE" if report.bronze_medal else
+                     "ABOVE MEDIAN" if report.above_median else "BELOW")
+            scores[short_id] = {"score": report.score, "medal": medal}
+        else:
+            scores[short_id] = {"score": None, "medal": None}
+
+    result = {
+        "exp_id": exp_id,
+        "is_lower_better": is_lower_better,
+        "thresholds": thresholds,
+        "scores": scores,
+        "graded_at": datetime.now().isoformat(),
+    }
+
+    cache_path = RUNS_DIR / run_name / "logs" / "test_scores.json"
+    with open(cache_path, "w") as f:
+        json.dump(result, f, indent=2)
+
+    return result
+
+
 @app.route("/")
 def index():
     return DASHBOARD_HTML
@@ -81,7 +186,6 @@ def api_run(run_name):
     nodes = journal["nodes"]
     node2parent = journal.get("node2parent", {})
 
-    # Build summary for each node (skip huge fields)
     summary_nodes = []
     for n in nodes:
         summary_nodes.append({
@@ -98,7 +202,6 @@ def api_run(run_name):
             "parent": node2parent.get(n["id"], None),
         })
 
-    # Best metric progression
     maximize = None
     for n in nodes:
         if n["metric"]["maximize"] is not None:
@@ -119,7 +222,6 @@ def api_run(run_name):
             current_best = v
         best_progression.append({"step": n["step"], "best": current_best, "value": v})
 
-    # Stage counts
     stages = {}
     for n in nodes:
         s = n["stage"]
@@ -127,7 +229,6 @@ def api_run(run_name):
             continue
         stages[s] = stages.get(s, 0) + 1
 
-    # Buggy vs good
     buggy = sum(1 for n in nodes if n["is_buggy"] is True)
     good = sum(1 for n in nodes if n["is_buggy"] is False)
     pending = sum(1 for n in nodes if n["is_buggy"] is None and n["stage"] != "root")
@@ -147,12 +248,12 @@ def api_run(run_name):
                         total_steps_cfg = int(val)
                         break
 
-    # Socrates transcripts
     socrates = load_socrates_transcripts(run_name)
+    test_scores = load_test_scores(run_name)
 
     return jsonify({
         "run_name": run_name,
-        "total_nodes": len(nodes) - 1,  # exclude root
+        "total_nodes": len(nodes) - 1,
         "total_steps_cfg": total_steps_cfg,
         "maximize": maximize,
         "nodes": summary_nodes,
@@ -164,7 +265,16 @@ def api_run(run_name):
         "best_code": best_code,
         "log_tail": log_tail,
         "socrates": socrates,
+        "test_scores": test_scores,
     })
+
+
+@app.route("/api/run/<run_name>/grade", methods=["POST"])
+def api_grade(run_name):
+    result = grade_run(run_name)
+    if "error" in result:
+        return jsonify(result), 400
+    return jsonify(result)
 
 
 DASHBOARD_HTML = r"""<!DOCTYPE html>
@@ -174,6 +284,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>MLEvolve Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3"></script>
 <style>
   :root {
     --bg: #0d1117; --surface: #161b22; --border: #30363d;
@@ -189,6 +300,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .header .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
   .header .refresh-info { color: var(--text2); font-size: 11px; }
+
+  .grade-btn { background: transparent; color: var(--orange); border: 1px solid var(--orange); border-radius: 6px; padding: 4px 12px; font-size: 12px; cursor: pointer; font-weight: 600; font-family: inherit; }
+  .grade-btn:hover { background: rgba(210,153,34,0.1); }
+  .grade-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
   /* Nav tabs */
   .nav-tabs { display: flex; gap: 0; background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 20px; }
@@ -227,6 +342,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .badge.evolution { background: rgba(188,140,255,0.15); color: var(--purple); }
   .badge.fusion, .badge.fusion_draft { background: rgba(210,153,34,0.15); color: var(--orange); }
   .badge.root { background: rgba(139,148,158,0.15); color: var(--text2); }
+
+  .medal-badge { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 10px; font-weight: 700; vertical-align: middle; }
+  .medal-badge.gold { background: rgba(255,215,0,0.2); color: #FFD700; }
+  .medal-badge.silver { background: rgba(192,192,192,0.2); color: #C0C0C0; }
+  .medal-badge.bronze { background: rgba(205,127,50,0.2); color: #CD7F32; }
+  .medal-badge.above-median { background: rgba(63,185,80,0.2); color: var(--green); }
+  .medal-badge.below { background: rgba(248,81,73,0.2); color: var(--red); }
 
   .buggy-true { color: var(--red); }
   .buggy-false { color: var(--green); }
@@ -270,6 +392,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div class="header">
   <h1>MLEvolve Dashboard</h1>
   <select id="runSelect"></select>
+  <button id="gradeBtn" class="grade-btn" onclick="gradeTestSet()">Grade Test Set</button>
   <div class="status">
     <div class="dot" id="statusDot"></div>
     <span class="refresh-info" id="refreshInfo">Auto-refresh: 10s</span>
@@ -290,6 +413,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="kpi-row">
       <div class="kpi"><div class="label">Steps</div><div class="value accent" id="kpiSteps">-</div></div>
       <div class="kpi"><div class="label">Best Train-Val Score</div><div class="value green" id="kpiBest">-</div></div>
+      <div class="kpi"><div class="label">Best Test Score</div><div class="value orange" id="kpiTestScore">-</div></div>
       <div class="kpi"><div class="label">Good Nodes</div><div class="value green" id="kpiGood">-</div></div>
       <div class="kpi"><div class="label">Buggy Nodes</div><div class="value red" id="kpiBuggy">-</div></div>
       <div class="kpi"><div class="label">Pending</div><div class="value orange" id="kpiPending">-</div></div>
@@ -297,7 +421,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
   </div>
   <div class="card">
-    <h2>Train-Val Score Progression</h2>
+    <h2>Score Progression</h2>
     <div class="chart-box"><canvas id="metricChart"></canvas></div>
   </div>
   <div class="card">
@@ -309,7 +433,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="table-scroll">
       <table class="node-table">
         <thead><tr>
-          <th>Step</th><th>ID</th><th>Stage</th><th>Train-Val</th><th>Buggy</th><th>Exec Time</th><th>Time</th><th>Plan</th>
+          <th>Step</th><th>ID</th><th>Stage</th><th>Train-Val</th><th>Test Score</th><th>Buggy</th><th>Exec Time</th><th>Time</th><th>Plan</th>
         </tr></thead>
         <tbody id="nodeTableBody"></tbody>
       </table>
@@ -343,6 +467,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 let metricChart = null, stageChart = null;
 let currentRun = null;
 let refreshInterval = null;
+let grading = false;
 
 // Tab navigation
 document.querySelectorAll('.nav-tab').forEach(tab => {
@@ -378,6 +503,12 @@ async function loadRun(runName) {
   render(data);
 }
 
+function medalBadge(medal) {
+  if (!medal) return '';
+  const cls = medal === 'GOLD' ? 'gold' : medal === 'SILVER' ? 'silver' : medal === 'BRONZE' ? 'bronze' : medal === 'ABOVE MEDIAN' ? 'above-median' : 'below';
+  return '<span class="medal-badge ' + cls + '">' + medal + '</span>';
+}
+
 function render(d) {
   // KPIs
   const totalCfg = d.total_steps_cfg || '?';
@@ -390,7 +521,49 @@ function render(d) {
   document.getElementById('kpiPending').textContent = d.pending;
   document.getElementById('kpiDir').textContent = d.maximize === true ? 'Maximize' : d.maximize === false ? 'Minimize' : '?';
 
-  renderMetricChart(bp);
+  // Test scores
+  const ts = d.test_scores;
+  const scores = ts ? ts.scores || {} : {};
+  const kpiTest = document.getElementById('kpiTestScore');
+  const btn = document.getElementById('gradeBtn');
+
+  if (ts && Object.keys(scores).length > 0) {
+    const isLower = ts.is_lower_better;
+    let bestTestScore = null;
+    let bestMedal = null;
+    for (const [id, s] of Object.entries(scores)) {
+      if (s.score != null) {
+        if (bestTestScore == null || (isLower ? s.score < bestTestScore : s.score > bestTestScore)) {
+          bestTestScore = s.score;
+          bestMedal = s.medal;
+        }
+      }
+    }
+    if (bestTestScore != null) {
+      kpiTest.innerHTML = bestTestScore.toFixed(6) + ' ' + medalBadge(bestMedal);
+    } else {
+      kpiTest.textContent = '-';
+    }
+    btn.textContent = 'Re-grade';
+    if (ts.graded_at) btn.title = 'Last graded: ' + new Date(ts.graded_at).toLocaleString();
+  } else {
+    kpiTest.textContent = '-';
+    btn.textContent = 'Grade Test Set';
+    btn.title = '';
+  }
+
+  // Build node id -> step map and test score chart data
+  const nodeStepMap = {};
+  d.nodes.forEach(n => { nodeStepMap[n.id] = n.step; });
+  const testData = [];
+  for (const [id, s] of Object.entries(scores)) {
+    if (s.score != null && nodeStepMap[id] != null) {
+      testData.push({ step: nodeStepMap[id], score: s.score });
+    }
+  }
+  testData.sort((a, b) => a.step - b.step);
+
+  renderMetricChart(bp, testData, ts ? ts.thresholds : null);
   renderStageChart(d.stages);
 
   // Node table
@@ -404,11 +577,14 @@ function render(d) {
     const metricText = n.metric !== null ? n.metric.toFixed(6) : '-';
     const execText = n.exec_time !== null ? n.exec_time.toFixed(1) + 's' : '-';
     const timeText = n.finish_time || n.created_time || '-';
+    const nodeScore = scores[n.id];
+    const testText = nodeScore && nodeScore.score != null ? nodeScore.score.toFixed(6) + ' ' + medalBadge(nodeScore.medal) : '-';
     tr.innerHTML = `
       <td>${n.step}</td>
       <td><code>${n.id}</code></td>
       <td><span class="badge ${n.stage}">${n.stage}</span></td>
       <td>${metricText}</td>
+      <td>${testText}</td>
       <td class="${buggyClass}">${buggyText}</td>
       <td>${execText}</td>
       <td>${timeText}</td>
@@ -501,24 +677,58 @@ function renderSocrates(sessions) {
   });
 }
 
-function renderMetricChart(bp) {
+function renderMetricChart(bp, testData, thresholds) {
   const ctx = document.getElementById('metricChart').getContext('2d');
   if (metricChart) metricChart.destroy();
+
+  const datasets = [
+    { label: 'Best', data: bp.map(p => p.best), borderColor: '#3fb950', backgroundColor: 'rgba(63,185,80,0.1)', fill: true, borderWidth: 2, pointRadius: 0, tension: 0.3 },
+    { label: 'Per-node', data: bp.map(p => p.value), borderColor: 'rgba(88,166,255,0.4)', borderWidth: 1, pointRadius: 2, pointBackgroundColor: '#58a6ff', fill: false }
+  ];
+
+  // Add test score overlay
+  if (testData && testData.length > 0) {
+    const testMap = {};
+    testData.forEach(t => { testMap[t.step] = t.score; });
+    const testValues = bp.map(p => testMap[p.step] !== undefined ? testMap[p.step] : null);
+    datasets.push({
+      label: 'Test Score', data: testValues, borderColor: '#d29922',
+      borderWidth: 2, pointRadius: 3, pointBackgroundColor: '#d29922', fill: false, spanGaps: false
+    });
+  }
+
+  // Medal threshold annotations
+  const annotations = {};
+  if (thresholds) {
+    const defs = [
+      { key: 'gold', color: '#FFD700', label: 'Gold' },
+      { key: 'silver', color: '#C0C0C0', label: 'Silver' },
+      { key: 'bronze', color: '#CD7F32', label: 'Bronze' },
+      { key: 'median', color: '#3fb950', label: 'Median' }
+    ];
+    defs.forEach(t => {
+      if (thresholds[t.key] != null) {
+        annotations[t.key + 'Line'] = {
+          type: 'line', yMin: thresholds[t.key], yMax: thresholds[t.key],
+          borderColor: t.color, borderWidth: 1, borderDash: [6, 3],
+          label: { display: true, content: t.label, position: 'end', color: t.color, font: { size: 9 }, backgroundColor: 'rgba(13,17,23,0.8)', padding: 2 }
+        };
+      }
+    });
+  }
+
   metricChart = new Chart(ctx, {
     type: 'line',
-    data: {
-      labels: bp.map(p => p.step),
-      datasets: [
-        { label: 'Best', data: bp.map(p => p.best), borderColor: '#3fb950', backgroundColor: 'rgba(63,185,80,0.1)', fill: true, borderWidth: 2, pointRadius: 0, tension: 0.3 },
-        { label: 'Per-node', data: bp.map(p => p.value), borderColor: 'rgba(88,166,255,0.4)', borderWidth: 1, pointRadius: 2, pointBackgroundColor: '#58a6ff', fill: false }
-      ]
-    },
+    data: { labels: bp.map(p => p.step), datasets },
     options: {
       responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { labels: { color: '#8b949e', font: { size: 11 } } } },
+      plugins: {
+        legend: { labels: { color: '#8b949e', font: { size: 11 } } },
+        annotation: { annotations }
+      },
       scales: {
         x: { title: { display: true, text: 'Step', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.5)' } },
-        y: { title: { display: true, text: 'Train-Val Score', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.5)' } }
+        y: { title: { display: true, text: 'Score', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.5)' } }
       }
     }
   });
@@ -540,6 +750,24 @@ function renderStageChart(stages) {
 function escapeHtml(s) {
   if (!s) return '';
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function gradeTestSet() {
+  if (!currentRun || grading) return;
+  grading = true;
+  const btn = document.getElementById('gradeBtn');
+  btn.textContent = 'Grading...';
+  btn.disabled = true;
+  const resp = await fetch('/api/run/' + currentRun + '/grade', { method: 'POST' });
+  grading = false;
+  btn.disabled = false;
+  if (resp.ok) {
+    await loadRun(currentRun);
+  } else {
+    const data = await resp.json();
+    btn.textContent = 'Grade Test Set';
+    alert('Grading failed: ' + (data.error || 'unknown error'));
+  }
 }
 
 document.getElementById('runSelect').addEventListener('change', e => {
