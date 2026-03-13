@@ -18,7 +18,7 @@ from agents.prompts import (
 from agents.planner import run_planner, generate_initial_plan, refine_plan_to_json, build_planner_task, build_planner_suffix
 from agents.coder import plan_and_code_query
 from agents.coder.diff_coder import diff_generate_and_apply
-from agents.socrates import socratic_review
+from agents.socrates import socratic_review, review_planning_result
 
 logger = logging.getLogger("MLEvolve")
 
@@ -240,7 +240,7 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
     if agent.acfg.use_diff_mode:
         try:
             logger.info(f"Using diff improve for node {parent_node.id}")
-            plan, code = _diff_improve(agent, prompt, agent.data_preview, parent_node)
+            plan, code = _diff_improve(agent, prompt, agent.data_preview, parent_node, prompt_complete)
         except Exception as e:
             logger.warning(f"Diff improve failed: {e}, falling back to full rewrite")
             plan, code = plan_and_code_query(agent, prompt_complete)
@@ -286,7 +286,7 @@ _IMPROVE_SUFFIX_EXTRA = (
 )
 
 
-def _diff_improve(agent, prompt_base, data_preview, parent_node):
+def _diff_improve(agent, prompt_base, data_preview, parent_node, agent_prompt_context=""):
     context = {
         "stage": "improve",
         "memory": prompt_base["Memory"],
@@ -307,7 +307,9 @@ def _diff_improve(agent, prompt_base, data_preview, parent_node):
         initial_plan = generate_initial_plan(agent, prompt_base, data_preview, context)
         initial_plan = socratic_review(agent, initial_plan,
                                        parent_output=str(context.get('execution_output', '')),
-                                       child_memory=prompt_base.get("Memory", ""))
+                                       child_memory=prompt_base.get("Memory", ""),
+                                       agent_prompt_context=agent_prompt_context,
+                                       stage_name="improve")
         planning_result = refine_plan_to_json(agent, initial_plan, prompt_base, data_preview, context)
     else:
         logger.info("[DiffImprove] Using direct planner (memory disabled or empty)")
@@ -319,6 +321,13 @@ def _diff_improve(agent, prompt_base, data_preview, parent_node):
             your_task_section=_IMPROVE_PLANNER_TASK,
             assistant_suffix=build_planner_suffix(prompt_base, data_preview, context, extra_text=_IMPROVE_SUFFIX_EXTRA),
             stage_name="ImprovePlanning",
+        )
+        planning_result = review_planning_result(
+            agent, planning_result,
+            parent_output=str(context.get('execution_output', '')),
+            child_memory=prompt_base.get("Memory", ""),
+            agent_prompt_context=agent_prompt_context,
+            stage_name="improve",
         )
 
     modules = planning_result.get('module', [])

@@ -19,8 +19,6 @@ Your role:
 - Do NOT give solutions or suggestions, only ask questions
 - Help the data scientist take a step back and reflect on the overall direction, methods, and alternatives
 
-**VERIFY CONCRETE RESULTS:** The scientist should be presenting ACTUAL completed experiment results with real metrics and scores. If the scientist says something like "training is still running", "I launched the script", or presents plans without concrete numbers, push back immediately — they should have finished all computation before presenting to you. Ask: "What were the actual validation scores?" or "Has this training run completed?"
-
 When you are satisfied with the data scientist's reasoning and plan, respond with:
 [APPROVED] followed by brief encouragement.
 
@@ -40,9 +38,7 @@ def get_pi_initial_review_prompt(scientist_report: str) -> str:
 {scientist_report}
 --- END ---
 
-First, verify the scientist has ACTUAL completed results with concrete metrics/scores (not just plans or "training started"). If results seem incomplete or the scientist mentions scripts still running, ask them to provide finished results before anything else.
-
-Then ask 2-3 probing questions, OR if their plan is solid and results are concrete, respond with [APPROVED]."""
+Ask 2-3 probing questions, OR if their plan is solid and results are concrete, respond with [APPROVED]."""
 
 
 def get_pi_followup_review_prompt(scientist_response: str) -> str:

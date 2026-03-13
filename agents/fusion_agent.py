@@ -13,6 +13,7 @@ from agents.coder import plan_and_code_query
 from agents.coder.diff_coder import diff_generate_and_apply
 from engine import solution_manager
 from agents.triggers import register_node
+from agents.socrates import review_planning_result
 
 logger = logging.getLogger("MLEvolve")
 
@@ -139,7 +140,7 @@ def fuse_two_nodes(agent, source_node: SearchNode, target_node: SearchNode) -> S
     if agent.acfg.use_diff_mode:
         try:
             logger.info(f"Using diff fusion for node {source_node.id} with reference {target_node.id}")
-            plan, code = _diff_fusion(agent, prompt, agent.data_preview, source_node)
+            plan, code = _diff_fusion(agent, prompt, agent.data_preview, source_node, prompt_complete)
         except Exception as e:
             logger.warning(f"Diff fusion failed: {e}, falling back to full fusion")
             plan, code = plan_and_code_query(agent, prompt_complete)
@@ -280,7 +281,7 @@ def _fuse_with_multiple_references(
     if agent.acfg.use_diff_mode:
         try:
             logger.info(f"Using diff multi-fusion for node {parent_node.id} with {len(reference_nodes)} references")
-            plan, code = _diff_multi_fusion(agent, prompt, agent.data_preview, parent_node)
+            plan, code = _diff_multi_fusion(agent, prompt, agent.data_preview, parent_node, prompt_complete)
         except Exception as e:
             logger.warning(f"Diff multi-fusion failed: {e}, falling back to full rewrite")
             plan, code = plan_and_code_query(agent, prompt_complete)
@@ -398,7 +399,7 @@ def _build_multi_fusion_planner_suffix(prompt_base, data_preview, context):
     )
 
 
-def _diff_fusion(agent, prompt_base, data_preview, source_node):
+def _diff_fusion(agent, prompt_base, data_preview, source_node, agent_prompt_context=""):
     reference_solution = prompt_base.get("Reference Solution", "")
 
     context = {
@@ -418,6 +419,12 @@ def _diff_fusion(agent, prompt_base, data_preview, source_node):
         your_task_section=_FUSION_PLANNER_TASK,
         assistant_suffix=_build_fusion_planner_suffix(prompt_base, data_preview, context),
         stage_name="FusionPlanning",
+    )
+
+    planning_result = review_planning_result(
+        agent, planning_result,
+        agent_prompt_context=agent_prompt_context,
+        stage_name="fusion",
     )
 
     modules = planning_result.get('module', [])
@@ -448,7 +455,7 @@ def _diff_fusion(agent, prompt_base, data_preview, source_node):
     )
 
 
-def _diff_multi_fusion(agent, prompt_base, data_preview, parent_node):
+def _diff_multi_fusion(agent, prompt_base, data_preview, parent_node, agent_prompt_context=""):
     reference_solutions = prompt_base.get("Reference Solutions", "")
 
     context = {
@@ -468,6 +475,12 @@ def _diff_multi_fusion(agent, prompt_base, data_preview, parent_node):
         your_task_section=_MULTI_FUSION_PLANNER_TASK,
         assistant_suffix=_build_multi_fusion_planner_suffix(prompt_base, data_preview, context),
         stage_name="MultiFusionPlanning",
+    )
+
+    planning_result = review_planning_result(
+        agent, planning_result,
+        agent_prompt_context=agent_prompt_context,
+        stage_name="fusion",
     )
 
     modules = planning_result.get('module', [])

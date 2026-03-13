@@ -8,6 +8,7 @@ from llm import compile_prompt_to_md
 from engine.search_node import SearchNode
 from agents.coder import plan_and_code_query, stepwise_plan_and_code_query
 from agents.triggers import register_node
+from agents.socrates import socratic_review
 from agents.prompts import (
     ROBUSTNESS_GENERALIZATION_STRATEGY,
     prompt_leakage_prevention,
@@ -152,6 +153,10 @@ def run(agent) -> SearchNode:
         )
     else:
         plan, code = plan_and_code_query(agent, prompt_complete)
+    plan = socratic_review(agent, plan,
+                           child_memory=prompt.get("Memory", ""),
+                           agent_prompt_context=prompt_complete,
+                           stage_name="draft")
     new_node = SearchNode(plan=plan, code=code, parent=agent.virtual_root, stage="draft",
                         local_best_node=agent.virtual_root)
     register_node(agent, new_node, prompt_complete, new_branch=True)

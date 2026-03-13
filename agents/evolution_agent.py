@@ -19,6 +19,7 @@ from agents.planner import run_planner, build_planner_task, build_planner_suffix
 from agents.coder import plan_and_code_query
 from agents.coder.diff_coder import diff_generate_and_apply
 from agents.triggers import register_node
+from agents.socrates import review_planning_result
 
 logger = logging.getLogger("MLEvolve")
 
@@ -205,7 +206,7 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
     if agent.acfg.use_diff_mode:
         try:
             logger.info(f"Using diff evolution for node {parent_node.id}")
-            plan, code = _diff_evolution(agent, prompt, agent.data_preview, parent_node)
+            plan, code = _diff_evolution(agent, prompt, agent.data_preview, parent_node, prompt_complete)
         except Exception as e:
             logger.warning(f"Diff evolution failed: {e}, falling back to full evolution")
             plan, code = plan_and_code_query(agent, prompt_complete)
@@ -257,7 +258,7 @@ def _build_evolution_suffix_extra(context):
     )
 
 
-def _diff_evolution(agent, prompt_base, data_preview, parent_node):
+def _diff_evolution(agent, prompt_base, data_preview, parent_node, agent_prompt_context=""):
     branch_history = prompt_base.get("Branch Evolution History", "")
 
     context = {
@@ -276,6 +277,14 @@ def _diff_evolution(agent, prompt_base, data_preview, parent_node):
         your_task_section=_EVOLUTION_PLANNER_TASK,
         assistant_suffix=build_planner_suffix(prompt_base, data_preview, context, extra_text=_build_evolution_suffix_extra(context)),
         stage_name="EvolutionPlanning",
+    )
+
+    planning_result = review_planning_result(
+        agent, planning_result,
+        parent_output=str(context.get('execution_output', '')),
+        child_memory=prompt_base.get("Memory", ""),
+        agent_prompt_context=agent_prompt_context,
+        stage_name="evolution",
     )
 
     modules = planning_result.get('module', [])
