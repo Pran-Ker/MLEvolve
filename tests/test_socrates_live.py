@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Live Socrates review tester — runs real API calls and writes dashboard-compatible output.
+Live Socrates review tester — runs real API calls, writes dashboard-compatible output.
 
 Usage:
     python tests/test_socrates_live.py                          # default: improve agent
@@ -8,13 +8,15 @@ Usage:
     python tests/test_socrates_live.py --stage fusion
     python tests/test_socrates_live.py --stage draft
     python tests/test_socrates_live.py --stage improve --rounds 5
+    python tests/test_socrates_live.py --run test               # creates a new test run
     python tests/test_socrates_live.py --run 20260308_163144_ventilator-pressure-prediction
+    python tests/test_socrates_live.py --list-runs
 
-Output is written to:
-    1. runs/<run>/logs/socrates_transcripts.jsonl  (if --run specified, viewable on dashboard)
-    2. tests/socrates_live_output.log              (always, human-readable)
+Output:
+    runs/<run>/logs/socrates_transcripts.jsonl   (viewable on dashboard)
+    tests/socrates_live_{stage}.log              (human-readable)
 
-Then open the dashboard to view:
+Dashboard:
     python dashboard.py
 """
 
@@ -125,7 +127,31 @@ SCENARIOS = {
 }
 
 
-def make_agent(scenario, max_rounds):
+def ensure_run_dir(run_name):
+    """Create the run directory with a minimal journal.json so the dashboard lists it."""
+    logs_dir = Path("runs") / run_name / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    journal_path = logs_dir / "journal.json"
+    if not journal_path.exists():
+        journal = {
+            "nodes": [{
+                "step": 0, "id": "socrates_test_root", "stage": "root",
+                "metric": {"value": 0, "maximize": True},
+                "is_buggy": None, "exec_time": 0,
+                "created_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "finish_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "plan": "Socrates test run",
+            }],
+            "node2parent": {},
+        }
+        with open(journal_path, "w") as f:
+            json.dump(journal, f, indent=2)
+
+    return str(logs_dir)
+
+
+def make_agent(scenario, max_rounds, log_dir):
     """Build a real-config agent for API calls."""
     code_cfg = SimpleNamespace(
         model="claude-sonnet-4-20250514", temp=0.7, base_url="", api_key="",
@@ -141,7 +167,7 @@ def make_agent(scenario, max_rounds):
         code=code_cfg,
     )
     cfg = SimpleNamespace(
-        log_dir=None,
+        log_dir=log_dir,
         agent=SimpleNamespace(code=code_cfg, feedback=feedback_cfg),
     )
 
@@ -156,12 +182,10 @@ def make_agent(scenario, max_rounds):
 
 
 class LiveLogger:
-    """Logs to both console and file, plus collects transcript for dashboard."""
+    """Logs to both console and file."""
 
     def __init__(self, log_path):
         self.log_path = log_path
-        self.transcript = []
-        self._current_round = {}
         with open(log_path, "w") as f:
             f.write("")
 
@@ -189,18 +213,19 @@ class LiveLogger:
 
 def run_test(stage, max_rounds, run_name, log_path):
     scenario = SCENARIOS[stage]
-    agent = make_agent(scenario, max_rounds)
+
+    # Set up run directory so _save_transcript writes the real JSONL
+    log_dir = ensure_run_dir(run_name)
+    agent = make_agent(scenario, max_rounds, log_dir)
     ll = LiveLogger(log_path)
 
     import agents.socrates.approval_loop as loop
 
-    # Save originals
+    # Wrap LLM calls with logging (call the real functions, just log around them)
     _orig_agentic = loop.agentic_chat
     _orig_chat = loop.llm_chat
-
     socrates_call = {"n": 0}
     planner_call = {"n": 0}
-    transcript_rounds = []
 
     def logged_agentic_chat(**kwargs):
         socrates_call["n"] += 1
@@ -217,13 +242,6 @@ def run_test(stage, max_rounds, run_name, log_path):
         approved = "[APPROVED]" in response.upper()
         ll.msg_block("Socrates responds", response)
         ll.log(f"  >> Approved: {approved}")
-
-        transcript_rounds.append({
-            "round": socrates_call["n"],
-            "socrates": response,
-            "approved": approved,
-        })
-
         return response, final_msgs
 
     def logged_chat(**kwargs):
@@ -239,14 +257,8 @@ def run_test(stage, max_rounds, run_name, log_path):
         response = _orig_chat(**kwargs)
 
         ll.msg_block("Planner responds", str(response))
-
-        # Attach planner response to the last transcript round
-        if transcript_rounds:
-            transcript_rounds[-1]["planner"] = str(response)
-
         return response
 
-    # Patch
     loop.agentic_chat = logged_agentic_chat
     loop.llm_chat = logged_chat
 
@@ -258,15 +270,14 @@ def run_test(stage, max_rounds, run_name, log_path):
     ll.log(f"\n  Stage:      {stage}")
     ll.log(f"  Max rounds: {max_rounds}")
     ll.log(f"  Task:       {scenario['task_desc'][:100]}...")
-    if run_name:
-        ll.log(f"  Dashboard:  runs/{run_name}/logs/socrates_transcripts.jsonl")
+    ll.log(f"  Dashboard:  runs/{run_name}/logs/socrates_transcripts.jsonl")
     ll.msg_block("ORIGINAL PLAN", scenario["plan"])
     if scenario["parent_output"]:
         ll.log(f"\n  Parent output: {scenario['parent_output']}")
     if scenario["child_memory"]:
         ll.msg_block("Memory (previous attempts)", scenario["child_memory"])
 
-    # Run
+    # Run the real Socrates review — _save_transcript writes the JSONL
     from agents.socrates import socratic_review
 
     start = time.time()
@@ -289,34 +300,8 @@ def run_test(stage, max_rounds, run_name, log_path):
     ll.log(f"  Rounds used:  {socrates_call['n']}")
     ll.log(f"  Time:         {elapsed:.1f}s")
     ll.msg_block("Final plan", final_plan)
-
-    # Build dashboard-compatible transcript entry
-    entry = {
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "stage": stage,
-        "original_plan": scenario["plan"][:500],
-        "approved": any(r.get("approved") for r in transcript_rounds),
-        "rounds": len(transcript_rounds),
-        "transcript": transcript_rounds,
-    }
-
-    # Write to dashboard location if run specified
-    if run_name:
-        dashboard_path = Path("runs") / run_name / "logs" / "socrates_transcripts.jsonl"
-        dashboard_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(dashboard_path, "a") as f:
-            f.write(json.dumps(entry) + "\n")
-        ll.log(f"\n  Dashboard transcript written to: {dashboard_path}")
-        ll.log(f"  View it: python dashboard.py  →  select run '{run_name}' → Socrates Reviews tab")
-
-    # Also write standalone JSON for easy reading
-    standalone = Path(log_path).with_suffix(".json")
-    with open(standalone, "w") as f:
-        json.dump(entry, f, indent=2)
-    ll.log(f"  Standalone JSON: {standalone}")
-    ll.log(f"  Full log:        {log_path}")
-
-    return entry
+    ll.log(f"\n  Dashboard: python dashboard.py → select '{run_name}' → Socrates Reviews tab")
+    ll.log(f"  Full log:  {log_path}")
 
 
 def main():
@@ -331,7 +316,7 @@ def main():
     )
     parser.add_argument(
         "--run", type=str, default=None,
-        help="Run name to write dashboard-compatible output (e.g. 20260308_163144_ventilator-pressure-prediction)"
+        help="Run name for dashboard output (default: auto-generated)"
     )
     parser.add_argument(
         "--list-runs", action="store_true",
@@ -350,14 +335,14 @@ def main():
             print("No runs/ directory found.")
         return
 
+    run_name = args.run or f"socrates_test_{args.stage}_{time.strftime('%Y%m%d_%H%M%S')}"
     log_path = os.path.join(os.path.dirname(__file__), f"socrates_live_{args.stage}.log")
 
     print(f"Running Socrates review for {args.stage} agent ({args.rounds} max rounds)...")
-    if args.run:
-        print(f"Dashboard output → runs/{args.run}/logs/socrates_transcripts.jsonl")
+    print(f"Dashboard output → runs/{run_name}/logs/socrates_transcripts.jsonl")
     print()
 
-    run_test(args.stage, args.rounds, args.run, log_path)
+    run_test(args.stage, args.rounds, run_name, log_path)
 
 
 if __name__ == "__main__":

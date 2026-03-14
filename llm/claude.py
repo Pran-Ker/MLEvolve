@@ -43,7 +43,7 @@ def query(
     _setup_claude_client(cfg)
     filtered_kwargs: dict = select_values(notnone, model_kwargs)
 
-    model = filtered_kwargs.get("model", "claude-sonnet-4-20250514")
+    model = filtered_kwargs.get("model", "claude-sonnet-4-6")
     temperature = filtered_kwargs.get("temperature", 1.0)
     max_tokens = filtered_kwargs.get("max_tokens", 16384)
 
@@ -129,7 +129,7 @@ def chat(
     _setup_claude_client(cfg)
 
     api_kwargs = {
-        "model": model or "claude-sonnet-4-20250514",
+        "model": model or "claude-sonnet-4-6",
         "max_tokens": max_tokens or 16384,
         "temperature": temperature if temperature is not None else 1.0,
         "messages": messages,
@@ -167,7 +167,7 @@ def agentic_chat(
     """
     _setup_claude_client(cfg)
 
-    model = model or "claude-sonnet-4-20250514"
+    model = model or "claude-sonnet-4-6"
     max_tokens = max_tokens or 16384
     temperature = temperature if temperature is not None else 1.0
 

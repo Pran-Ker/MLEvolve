@@ -2,14 +2,46 @@
 Live MLEvolve experiment dashboard.
 Usage: .venv/bin/python dashboard.py [--port 8050]
 """
+import gzip
 import json
 import argparse
 from pathlib import Path
 from datetime import datetime
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 
 app = Flask(__name__)
+
+
+@app.after_request
+def compress(response):
+    if 'gzip' not in request.headers.get('Accept-Encoding', ''):
+        return response
+    if response.status_code < 200 or response.status_code >= 300:
+        return response
+    if response.content_type and 'application/json' in response.content_type:
+        response.data = gzip.compress(response.data, compresslevel=1)
+        response.headers['Content-Encoding'] = 'gzip'
+        response.headers['Content-Length'] = len(response.data)
+    return response
 RUNS_DIR = Path("runs")
+
+# Simple file cache: path -> (mtime, data)
+_file_cache = {}
+
+
+def _cached_json(path):
+    """Read and cache a JSON file, re-reading only when mtime changes."""
+    path = Path(path)
+    if not path.exists():
+        return None
+    mtime = path.stat().st_mtime
+    cached = _file_cache.get(str(path))
+    if cached and cached[0] == mtime:
+        return cached[1]
+    with open(path) as f:
+        data = json.load(f)
+    _file_cache[str(path)] = (mtime, data)
+    return data
 
 
 def find_runs():
@@ -24,10 +56,7 @@ def find_runs():
 
 def load_journal(run_name):
     journal_path = RUNS_DIR / run_name / "logs" / "journal.json"
-    if not journal_path.exists():
-        return None
-    with open(journal_path) as f:
-        return json.load(f)
+    return _cached_json(journal_path)
 
 
 def load_best_code(run_name):
@@ -233,9 +262,6 @@ def api_run(run_name):
     good = sum(1 for n in nodes if n["is_buggy"] is False)
     pending = sum(1 for n in nodes if n["is_buggy"] is None and n["stage"] != "root")
 
-    best_code = load_best_code(run_name)
-    log_tail = load_log_tail(run_name)
-
     total_steps_cfg = None
     cfg_text = load_config(run_name)
     if cfg_text:
@@ -248,7 +274,6 @@ def api_run(run_name):
                         total_steps_cfg = int(val)
                         break
 
-    socrates = load_socrates_transcripts(run_name)
     test_scores = load_test_scores(run_name)
 
     return jsonify({
@@ -262,11 +287,49 @@ def api_run(run_name):
         "buggy": buggy,
         "good": good,
         "pending": pending,
-        "best_code": best_code,
-        "log_tail": log_tail,
-        "socrates": socrates,
         "test_scores": test_scores,
     })
+
+
+@app.route("/api/run/<run_name>/node/<node_id>")
+def api_node_detail(run_name, node_id):
+    """Return full detail for a single node (lazy-loaded on double-click)."""
+    journal = load_journal(run_name)
+    if journal is None:
+        return jsonify({"error": "not found"}), 404
+    for n in journal["nodes"]:
+        if n["id"][:8] == node_id or n["id"] == node_id:
+            return jsonify({
+                "step": n["step"],
+                "id": n["id"][:8],
+                "stage": n["stage"],
+                "metric": n["metric"]["value"],
+                "is_buggy": n["is_buggy"],
+                "exec_time": n.get("exec_time"),
+                "plan": n.get("plan") or "",
+                "analysis": n.get("analysis") or "",
+                "code_summary": n.get("code_summary") or "",
+                "term_out": n.get("_term_out") or [],
+                "exc_type": n.get("exc_type"),
+                "exc_info": n.get("exc_info"),
+                "code": n.get("code") or "",
+            })
+    return jsonify({"error": "node not found"}), 404
+
+
+@app.route("/api/run/<run_name>/code-logs")
+def api_code_logs(run_name):
+    """Return best code and log tail (lazy-loaded for Code & Logs tab)."""
+    return jsonify({
+        "best_code": load_best_code(run_name),
+        "log_tail": load_log_tail(run_name),
+    })
+
+
+@app.route("/api/run/<run_name>/socrates")
+def api_socrates(run_name):
+    """Return Socrates transcripts (lazy-loaded for Socrates tab)."""
+    return jsonify(load_socrates_transcripts(run_name))
 
 
 @app.route("/api/run/<run_name>/grade", methods=["POST"])
@@ -285,6 +348,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <title>MLEvolve Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/languages/python.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
 <style>
   :root {
     --bg: #0d1117; --surface: #161b22; --border: #30363d;
@@ -353,11 +420,36 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .buggy-true { color: var(--red); }
   .buggy-false { color: var(--green); }
 
+  .code-wrapper { position: relative; }
+  .copy-btn { position: absolute; top: 8px; right: 8px; background: var(--border); color: var(--text2); border: none; border-radius: 4px; padding: 4px 10px; font-size: 11px; cursor: pointer; font-family: inherit; z-index: 1; }
+  .copy-btn:hover { background: var(--accent); color: var(--bg); }
   pre.code-block { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; font-size: 11px; max-height: 400px; overflow: auto; white-space: pre-wrap; word-break: break-all; line-height: 1.5; }
+  pre.code-block code.hljs { background: transparent; padding: 0; }
   pre.log-block { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; font-size: 11px; max-height: 300px; overflow: auto; white-space: pre-wrap; word-break: break-all; color: var(--text2); line-height: 1.4; }
 
   .plan-text { max-width: 400px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
   .plan-text:hover { white-space: normal; overflow: visible; }
+  .node-table tr.selected { background: rgba(88,166,255,0.12); }
+
+  /* Step detail page */
+  .step-detail { max-width: 1000px; margin: 0 auto; padding: 16px; }
+  .step-detail .detail-header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .step-detail .detail-header h2 { font-size: 14px; color: var(--accent); }
+  .step-detail .detail-meta { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; font-size: 12px; color: var(--text2); }
+  .step-detail .detail-meta span { background: var(--bg); padding: 4px 10px; border-radius: 6px; }
+  .step-detail .plan-content { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; line-height: 1.7; font-size: 13px; }
+  .step-detail .plan-content h1, .step-detail .plan-content h2, .step-detail .plan-content h3 { color: var(--accent); margin: 16px 0 8px; }
+  .step-detail .plan-content h1 { font-size: 18px; }
+  .step-detail .plan-content h2 { font-size: 15px; }
+  .step-detail .plan-content h3 { font-size: 13px; }
+  .step-detail .plan-content p { margin: 8px 0; }
+  .step-detail .plan-content code { background: var(--bg); padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+  .step-detail .plan-content pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow-x: auto; margin: 8px 0; }
+  .step-detail .plan-content pre code { background: none; padding: 0; }
+  .step-detail .plan-content ul, .step-detail .plan-content ol { margin: 8px 0; padding-left: 24px; }
+  .step-detail .plan-content li { margin: 4px 0; }
+  .step-detail .back-btn { background: transparent; color: var(--accent); border: 1px solid var(--accent); border-radius: 6px; padding: 4px 12px; font-size: 12px; cursor: pointer; font-family: inherit; }
+  .step-detail .back-btn:hover { background: rgba(88,166,255,0.1); }
 
   /* Socrates styles */
   .socrates-list { max-width: 1400px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 16px; }
@@ -403,6 +495,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="nav-tab active" data-page="overview">Overview</div>
   <div class="nav-tab" data-page="socrates">Socrates Reviews <span id="socratesCount" style="color:var(--purple)"></span></div>
   <div class="nav-tab" data-page="code">Code & Logs</div>
+  <div class="nav-tab" data-page="step-detail" id="stepDetailTab" style="display:none">Step Detail</div>
 </div>
 
 <!-- PAGE: Overview -->
@@ -421,8 +514,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
   </div>
   <div class="card">
-    <h2>Score Progression</h2>
+    <h2>Validation Score</h2>
     <div class="chart-box"><canvas id="metricChart"></canvas></div>
+  </div>
+  <div class="card">
+    <h2>Test Score</h2>
+    <div class="chart-box"><canvas id="testChart"></canvas></div>
   </div>
   <div class="card">
     <h2>Stage Distribution</h2>
@@ -442,6 +539,18 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </div>
 </div>
 
+<!-- PAGE: Step Detail -->
+<div class="page" id="page-step-detail">
+  <div class="step-detail">
+    <div class="detail-header">
+      <button class="back-btn" onclick="goBackToOverview()">Back</button>
+      <h2 id="detailTitle">Step</h2>
+    </div>
+    <div class="detail-meta" id="detailMeta"></div>
+    <div id="detailSections"></div>
+  </div>
+</div>
+
 <!-- PAGE: Socrates Reviews -->
 <div class="page" id="page-socrates">
   <div class="socrates-list" id="socratesList">
@@ -454,7 +563,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div class="grid">
   <div class="card">
     <h2>Best Solution Code</h2>
-    <pre class="code-block" id="bestCode">No solution yet...</pre>
+    <div class="code-wrapper">
+      <button class="copy-btn" onclick="copyCode()">Copy</button>
+      <pre class="code-block"><code class="language-python" id="bestCode">No solution yet...</code></pre>
+    </div>
   </div>
   <div class="card">
     <h2>Recent Logs</h2>
@@ -464,10 +576,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </div>
 
 <script>
-let metricChart = null, stageChart = null;
+let metricChart = null, testChart = null, stageChart = null;
 let currentRun = null;
+let lastRunData = null;
 let refreshInterval = null;
 let grading = false;
+let activeTab = 'overview';
+let codeLogsLoaded = false;
+let socratesLoaded = false;
 
 // Tab navigation
 document.querySelectorAll('.nav-tab').forEach(tab => {
@@ -475,7 +591,10 @@ document.querySelectorAll('.nav-tab').forEach(tab => {
     document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     tab.classList.add('active');
-    document.getElementById('page-' + tab.dataset.page).classList.add('active');
+    activeTab = tab.dataset.page;
+    document.getElementById('page-' + activeTab).classList.add('active');
+    if (activeTab === 'code' && !codeLogsLoaded && currentRun) loadCodeLogs(currentRun);
+    if (activeTab === 'socrates' && !socratesLoaded && currentRun) loadSocrates(currentRun);
   });
 });
 
@@ -510,6 +629,7 @@ function medalBadge(medal) {
 }
 
 function render(d) {
+  lastRunData = d;
   // KPIs
   const totalCfg = d.total_steps_cfg || '?';
   document.getElementById('kpiSteps').textContent = d.total_nodes + ' / ' + totalCfg;
@@ -563,7 +683,8 @@ function render(d) {
   }
   testData.sort((a, b) => a.step - b.step);
 
-  renderMetricChart(bp, testData, ts ? ts.thresholds : null);
+  renderMetricChart(bp);
+  renderTestChart(testData, ts ? ts.thresholds : null);
   renderStageChart(d.stages);
 
   // Node table
@@ -576,7 +697,17 @@ function render(d) {
     const buggyText = n.is_buggy === true ? 'YES' : n.is_buggy === false ? 'NO' : '...';
     const metricText = n.metric !== null ? n.metric.toFixed(6) : '-';
     const execText = n.exec_time !== null ? n.exec_time.toFixed(1) + 's' : '-';
-    const timeText = n.finish_time || n.created_time || '-';
+    const rawTime = n.finish_time || n.created_time || '';
+    let timeText = '-';
+    if (rawTime) {
+      const m = rawTime.match(/T(\d{2}):(\d{2})/);
+      if (m) {
+        let h = parseInt(m[1]), mm = m[2];
+        const ampm = h >= 12 ? 'PM' : 'AM';
+        h = h % 12 || 12;
+        timeText = h + ':' + mm + ' ' + ampm;
+      } else { timeText = rawTime; }
+    }
     const nodeScore = scores[n.id];
     const testText = nodeScore && nodeScore.score != null ? nodeScore.score.toFixed(6) + ' ' + medalBadge(nodeScore.medal) : '-';
     tr.innerHTML = `
@@ -590,19 +721,36 @@ function render(d) {
       <td>${timeText}</td>
       <td><div class="plan-text">${escapeHtml(n.plan)}</div></td>
     `;
+    tr.addEventListener('dblclick', () => {
+      openStepDetail(n);
+    });
     tbody.appendChild(tr);
   });
 
-  // Best code
-  document.getElementById('bestCode').textContent = d.best_code || 'No solution yet...';
+  // Lazy-load tab-specific data if that tab is active
+  if (activeTab === 'code') loadCodeLogs(d.run_name);
+  if (activeTab === 'socrates') loadSocrates(d.run_name);
+}
 
-  // Logs
+async function loadCodeLogs(runName) {
+  const resp = await fetch('/api/run/' + runName + '/code-logs');
+  if (!resp.ok) return;
+  const d = await resp.json();
+  const codeEl = document.getElementById('bestCode');
+  codeEl.textContent = d.best_code || 'No solution yet...';
+  if (d.best_code) hljs.highlightElement(codeEl);
   document.getElementById('logTail').textContent = d.log_tail || 'No logs yet...';
   const logEl = document.getElementById('logTail');
   logEl.scrollTop = logEl.scrollHeight;
+  codeLogsLoaded = true;
+}
 
-  // Socrates
-  renderSocrates(d.socrates || []);
+async function loadSocrates(runName) {
+  const resp = await fetch('/api/run/' + runName + '/socrates');
+  if (!resp.ok) return;
+  const sessions = await resp.json();
+  renderSocrates(sessions);
+  socratesLoaded = true;
 }
 
 // Track which Socrates sessions the user has manually toggled
@@ -677,7 +825,7 @@ function renderSocrates(sessions) {
   });
 }
 
-function renderMetricChart(bp, testData, thresholds) {
+function renderMetricChart(bp) {
   const ctx = document.getElementById('metricChart').getContext('2d');
   if (metricChart) metricChart.destroy();
 
@@ -686,18 +834,24 @@ function renderMetricChart(bp, testData, thresholds) {
     { label: 'Per-node', data: bp.map(p => p.value), borderColor: 'rgba(88,166,255,0.4)', borderWidth: 1, pointRadius: 2, pointBackgroundColor: '#58a6ff', fill: false }
   ];
 
-  // Add test score overlay
-  if (testData && testData.length > 0) {
-    const testMap = {};
-    testData.forEach(t => { testMap[t.step] = t.score; });
-    const testValues = bp.map(p => testMap[p.step] !== undefined ? testMap[p.step] : null);
-    datasets.push({
-      label: 'Test Score', data: testValues, borderColor: '#d29922',
-      borderWidth: 2, pointRadius: 3, pointBackgroundColor: '#d29922', fill: false, spanGaps: false
-    });
-  }
+  metricChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: bp.map(p => p.step), datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { labels: { color: '#8b949e', font: { size: 11 } } } },
+      scales: {
+        x: { title: { display: true, text: 'Step', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.5)' } },
+        y: { title: { display: true, text: 'Score', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.5)' } }
+      }
+    }
+  });
+}
 
-  // Medal threshold annotations
+function renderTestChart(testData, thresholds) {
+  const ctx = document.getElementById('testChart').getContext('2d');
+  if (testChart) testChart.destroy();
+
   const annotations = {};
   if (thresholds) {
     const defs = [
@@ -717,9 +871,18 @@ function renderMetricChart(bp, testData, thresholds) {
     });
   }
 
-  metricChart = new Chart(ctx, {
+  const datasets = [];
+  if (testData && testData.length > 0) {
+    datasets.push({
+      label: 'Test Score', data: testData.map(t => ({ x: t.step, y: t.score })),
+      borderColor: '#d29922', backgroundColor: 'rgba(210,153,34,0.1)', fill: true,
+      borderWidth: 2, pointRadius: 3, pointBackgroundColor: '#d29922'
+    });
+  }
+
+  testChart = new Chart(ctx, {
     type: 'line',
-    data: { labels: bp.map(p => p.step), datasets },
+    data: { datasets },
     options: {
       responsive: true, maintainAspectRatio: false,
       plugins: {
@@ -727,7 +890,7 @@ function renderMetricChart(bp, testData, thresholds) {
         annotation: { annotations }
       },
       scales: {
-        x: { title: { display: true, text: 'Step', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.5)' } },
+        x: { type: 'linear', title: { display: true, text: 'Step', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.5)' } },
         y: { title: { display: true, text: 'Score', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.5)' } }
       }
     }
@@ -744,6 +907,77 @@ function renderStageChart(stages) {
     type: 'doughnut',
     data: { labels, datasets: [{ data: values, backgroundColor: labels.map(l => colors[l] || '#8b949e'), borderColor: '#161b22', borderWidth: 2 }] },
     options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { color: '#e6edf3', font: { size: 11 }, padding: 8 } } } }
+  });
+}
+
+async function openStepDetail(nodeStub) {
+  // Show loading state immediately
+  const tab = document.getElementById('stepDetailTab');
+  tab.style.display = '';
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  tab.classList.add('active');
+  activeTab = 'step-detail';
+  document.getElementById('page-step-detail').classList.add('active');
+  document.getElementById('detailTitle').textContent = 'Step ' + nodeStub.step + ' — ' + nodeStub.id;
+  document.getElementById('detailSections').innerHTML = '<div style="color:var(--text2);padding:40px;text-align:center">Loading...</div>';
+
+  // Fetch full detail from server
+  const resp = await fetch('/api/run/' + currentRun + '/node/' + nodeStub.id);
+  if (!resp.ok) {
+    document.getElementById('detailSections').innerHTML = '<div style="color:var(--red);padding:40px">Failed to load node detail</div>';
+    return;
+  }
+  const node = await resp.json();
+  const parseMd = typeof marked.parse === 'function' ? marked.parse : marked;
+
+  const metricText = node.metric !== null ? node.metric.toFixed(6) : '-';
+  const execText = node.exec_time !== null ? node.exec_time.toFixed(1) + 's' : '-';
+  document.getElementById('detailMeta').innerHTML =
+    '<span>Stage: <span class="badge ' + node.stage + '">' + node.stage + '</span></span>' +
+    '<span>Score: ' + metricText + '</span>' +
+    '<span>Buggy: ' + (node.is_buggy === true ? 'YES' : node.is_buggy === false ? 'NO' : '...') + '</span>' +
+    '<span>Exec: ' + execText + '</span>';
+
+  let html = '';
+  if (node.plan) {
+    html += '<div class="card" style="margin-bottom:12px"><h2>Plan</h2><div class="plan-content">' + parseMd(node.plan) + '</div></div>';
+  }
+  if (node.analysis) {
+    html += '<div class="card" style="margin-bottom:12px"><h2>Analysis</h2><div class="plan-content">' + parseMd(node.analysis) + '</div></div>';
+  }
+  if (node.code_summary) {
+    html += '<div class="card" style="margin-bottom:12px"><h2>Code Summary</h2><div class="plan-content">' + parseMd(node.code_summary) + '</div></div>';
+  }
+  const termOut = (node.term_out || []).join('');
+  if (termOut) {
+    html += '<div class="card" style="margin-bottom:12px"><h2>Execution Output</h2><pre class="log-block" style="max-height:400px">' + escapeHtml(termOut) + '</pre></div>';
+  }
+  if (node.exc_type) {
+    const errMsg = node.exc_info ? (node.exc_info.message || JSON.stringify(node.exc_info)) : '';
+    html += '<div class="card" style="margin-bottom:12px"><h2>Error</h2><pre class="log-block" style="color:var(--red)">' + escapeHtml(node.exc_type + ': ' + errMsg) + '</pre></div>';
+  }
+  if (node.code) {
+    html += '<div class="card" style="margin-bottom:12px"><h2>Code</h2><div class="code-wrapper"><button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById(\'detailCode\').textContent).then(()=>{this.textContent=\'Copied!\';setTimeout(()=>this.textContent=\'Copy\',1500)})">Copy</button><pre class="code-block"><code class="language-python" id="detailCode">' + escapeHtml(node.code) + '</code></pre></div></div>';
+  }
+  document.getElementById('detailSections').innerHTML = html;
+  const codeBlock = document.getElementById('detailCode');
+  if (codeBlock) hljs.highlightElement(codeBlock);
+}
+
+function goBackToOverview() {
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelector('[data-page="overview"]').classList.add('active');
+  document.getElementById('page-overview').classList.add('active');
+}
+
+function copyCode() {
+  const text = document.getElementById('bestCode').textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.querySelector('.copy-btn');
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy', 1500);
   });
 }
 
@@ -774,11 +1008,15 @@ document.getElementById('runSelect').addEventListener('change', e => {
   currentRun = e.target.value;
   socratesOpenState = {};
   socratesInitialized = false;
+  codeLogsLoaded = false;
+  socratesLoaded = false;
   loadRun(currentRun);
 });
 
 async function refresh() {
   await loadRuns();
+  codeLogsLoaded = false;
+  socratesLoaded = false;
   if (currentRun) await loadRun(currentRun);
   document.getElementById('refreshInfo').textContent = 'Updated: ' + new Date().toLocaleTimeString() + ' (10s)';
 }

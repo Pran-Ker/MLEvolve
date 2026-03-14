@@ -44,12 +44,12 @@ agent:
 
   # --- LLM models ---
   code:
-    model: claude-sonnet-4-20250514
+    model: claude-opus-4-6
     temp: 1
     base_url: ""
     api_key: ""    # Will use ANTHROPIC_API_KEY env var
   feedback:
-    model: claude-sonnet-4-20250514
+    model: claude-opus-4-6
     temp: 1
     base_url: ""
     api_key: ""    # Will use ANTHROPIC_API_KEY env var

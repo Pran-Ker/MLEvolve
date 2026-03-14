@@ -66,6 +66,10 @@ def loads_json(s: str, cls: Type[G]) -> G:
         for child_id, parent_id in obj_dict["node2parent"].items():
             id2nodes[child_id].parent = id2nodes[parent_id]
             id2nodes[child_id].__post_init__()
+        if "node2best_local_node" in obj_dict:
+            for node_id, best_id in obj_dict["node2best_local_node"].items():
+                if node_id in id2nodes and best_id in id2nodes:
+                    id2nodes[node_id].local_best_node = id2nodes[best_id]
     return obj
 
 

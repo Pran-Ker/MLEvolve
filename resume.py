@@ -109,6 +109,9 @@ def rebuild_agent_state(agent: Agent, journal: Journal):
             agent.best_node = node
             agent.best_metric = node.metric.value
 
+    # Rebuild fusion_draft_count
+    agent.fusion_draft_count = sum(1 for n in journal.nodes if n.stage == "fusion_draft")
+
     # Rebuild top candidates
     agent.top_candidates = []
     for node in journal.nodes[1:]:
@@ -116,10 +119,29 @@ def rebuild_agent_state(agent: Agent, journal: Journal):
             from engine.solution_manager import update_top_candidates
             update_top_candidates(agent, node)
 
+    # Restore local_best_node for nodes that didn't get it from JSON
+    for node in journal.nodes[1:]:
+        if node.local_best_node is None:
+            if node.stage in ("draft", "fusion_draft"):
+                node.local_best_node = agent.virtual_root
+            elif not node.is_buggy and node.metric and node.metric.value is not None:
+                node.local_best_node = node
+            elif node.parent and node.parent.local_best_node:
+                node.local_best_node = node.parent.local_best_node
+
+    # Rebuild current_node_list (active improvement chains)
+    agent.current_node_list = [
+        n for n in journal.nodes[1:]
+        if n.is_leaf and not n.is_terminal and not n.is_buggy
+        and n.continue_improve
+    ]
+
     logger = logging.getLogger("MLEvolve")
     logger.info(f"[resume] Rebuilt state: {len(journal)} nodes, "
                 f"{len(agent.branch_all_nodes)} branches, "
-                f"best={agent.best_metric}, next_branch_id={agent.next_branch_id}")
+                f"best={agent.best_metric}, next_branch_id={agent.next_branch_id}, "
+                f"fusion_drafts={agent.fusion_draft_count}, "
+                f"active_chains={len(agent.current_node_list)}")
 
 
 def resume():
