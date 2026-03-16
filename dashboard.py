@@ -938,7 +938,8 @@ async function openStepDetail(nodeStub) {
     return;
   }
   const node = await resp.json();
-  const parseMd = typeof marked.parse === 'function' ? marked.parse : marked;
+  const _marked = typeof marked.parse === 'function' ? marked.parse : marked;
+  const parseMd = (s) => _marked(s.replace(/</g, '&lt;'));
 
   const metricText = node.metric !== null ? node.metric.toFixed(6) : '-';
   const execText = node.exec_time !== null ? node.exec_time.toFixed(1) + 's' : '-';
