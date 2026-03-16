@@ -832,20 +832,22 @@ function renderMetricChart(bp) {
   const ctx = document.getElementById('metricChart').getContext('2d');
   if (metricChart) metricChart.destroy();
 
+  const filtered = bp.filter(p => (p.value === null || p.value <= 4) && (p.best === null || p.best <= 4));
+
   const datasets = [
-    { label: 'Best', data: bp.map(p => p.best), borderColor: '#3fb950', backgroundColor: 'rgba(63,185,80,0.1)', fill: true, borderWidth: 2, pointRadius: 0, tension: 0.3 },
-    { label: 'Per-node', data: bp.map(p => p.value), borderColor: 'rgba(88,166,255,0.4)', borderWidth: 1, pointRadius: 2, pointBackgroundColor: '#58a6ff', fill: false }
+    { label: 'Best', data: filtered.map(p => p.best), borderColor: '#3fb950', backgroundColor: 'rgba(63,185,80,0.1)', fill: true, borderWidth: 2, pointRadius: 0, tension: 0.3 },
+    { label: 'Per-node', data: filtered.map(p => p.value), borderColor: 'rgba(88,166,255,0.4)', borderWidth: 1, pointRadius: 2, pointBackgroundColor: '#58a6ff', fill: false }
   ];
 
   metricChart = new Chart(ctx, {
     type: 'line',
-    data: { labels: bp.map(p => p.step), datasets },
+    data: { labels: filtered.map(p => p.step), datasets },
     options: {
       responsive: true, maintainAspectRatio: false,
       plugins: { legend: { labels: { color: '#8b949e', font: { size: 11 } } } },
       scales: {
         x: { title: { display: true, text: 'Step', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.5)' } },
-        y: { title: { display: true, text: 'Score', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.5)' } }
+        y: { title: { display: true, text: 'Score', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.5)' }, max: 4 }
       }
     }
   });
@@ -875,9 +877,10 @@ function renderTestChart(testData, thresholds) {
   }
 
   const datasets = [];
-  if (testData && testData.length > 0) {
+  const filteredTestData = testData ? testData.filter(t => t.score <= 4) : [];
+  if (filteredTestData.length > 0) {
     datasets.push({
-      label: 'Test Score', data: testData.map(t => ({ x: t.step, y: t.score })),
+      label: 'Test Score', data: filteredTestData.map(t => ({ x: t.step, y: t.score })),
       borderColor: '#d29922', backgroundColor: 'rgba(210,153,34,0.1)', fill: true,
       borderWidth: 2, pointRadius: 3, pointBackgroundColor: '#d29922'
     });
@@ -894,7 +897,7 @@ function renderTestChart(testData, thresholds) {
       },
       scales: {
         x: { type: 'linear', title: { display: true, text: 'Step', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.5)' } },
-        y: { title: { display: true, text: 'Score', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.5)' } }
+        y: { title: { display: true, text: 'Score', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.5)' }, max: 4 }
       }
     }
   });
