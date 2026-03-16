@@ -522,10 +522,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h2>Test Score</h2>
     <div class="chart-box"><canvas id="testChart"></canvas></div>
   </div>
+  <!-- DISABLED: Stage Distribution
   <div class="card">
     <h2>Stage Distribution</h2>
     <div class="chart-box"><canvas id="stageChart"></canvas></div>
   </div>
+  -->
   <div class="card full">
     <h2>Nodes (newest first)</h2>
     <div class="table-scroll">
@@ -898,6 +900,7 @@ function renderTestChart(testData, thresholds) {
   });
 }
 
+/* DISABLED: Stage Distribution chart
 function renderStageChart(stages) {
   const ctx = document.getElementById('stageChart').getContext('2d');
   if (stageChart) stageChart.destroy();
@@ -910,6 +913,8 @@ function renderStageChart(stages) {
     options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { color: '#e6edf3', font: { size: 11 }, padding: 8 } } } }
   });
 }
+*/
+function renderStageChart(stages) {}
 
 async function openStepDetail(nodeStub) {
   // Show loading state immediately
